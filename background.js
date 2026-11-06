@@ -340,7 +340,7 @@ function countReminder(n) {
 
 const BATCH_MAX_IMAGES = 8; // lô nhỏ: model lite hay trả "no text" hàng loạt khi lô lớn
 const BATCH_MAX_BYTES = 10 * 1024 * 1024;
-const MAX_ROUNDS = 3; // vòng 1: gửi theo lô; vòng 2-3: gom ảnh trả rỗng/thiếu gửi lại theo lô
+const EXTRA_ROUND = 4; // vòng cuối: chỉ chạy khi vòng 3 còn > 1 ảnh rỗng; chạy xong thì dừng
 
 // Dịch tất cả ảnh: gửi nhiều ảnh trong một yêu cầu, chia lô khi quá nhiều hoặc quá nặng
 async function translateAllGemini(tabId, urls) {
@@ -424,17 +424,8 @@ Many consecutive images may contain no text at all (just artwork or empty space)
   const showBlocks = async (img, blocks, canRecheck, round = 1) => {
     const bitmap = await createImageBitmap(img.blob);
     try {
-      let items = itemsFromBlocks(blocks, bitmap, round === MAX_ROUNDS); // chỉ kiểm tra chặt ở vòng cuối
+      let items = itemsFromBlocks(blocks, bitmap, round === EXTRA_ROUND); // chỉ kiểm tra chặt ở vòng cuối
       console.log(`[OCR] vòng ${round}: ${blocks.length} khối -> vẽ ${items.length}`, img.srcUrl);
-      if (!items.length && blocks.length && canRecheck) {
-        // Có khối nhưng vùng chữ đều trống trên ảnh này: nhiều khả năng bị gán nhầm ảnh -> hỏi lại riêng ảnh này
-        try {
-          const b64 = bytesToBase64(new Uint8Array(await img.blob.arrayBuffer()));
-          items = itemsFromBlocks(await callGemini(apiKey, b64, img.mime, targetLang), bitmap);
-        } catch (err) {
-          console.warn('[Gemini] thử lại ảnh lẻ lỗi', img.srcUrl, err.message);
-        }
-      }
       if (items.length) {
         notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width: bitmap.width, height: bitmap.height, items });
         ok++;
@@ -464,14 +455,11 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     }
   }
 
-  // Vòng 2..MAX_ROUNDS: gom mọi ảnh còn bị nghi từ tất cả các lô, gửi lại theo lô (ít yêu cầu nhất có thể).
-  // Ảnh có chữ thì vẽ và rời danh sách; ảnh vẫn rỗng/lỗi chuyển sang vòng sau. Hết vòng cuối mà vẫn rỗng/thiếu thì bỏ, không gọi thêm.
-  let pending = suspects;
-  for (let round = 2; round <= MAX_ROUNDS && pending.length; round++) {
-    const last = round === MAX_ROUNDS;
+  // Chia ảnh thành các lô theo số lượng và dung lượng
+  const makeGroups = (imgs) => {
     const groups = [];
     let cur = [], curBytes = 0;
-    for (const img of pending) {
+    for (const img of imgs) {
       if (cur.length && (cur.length >= BATCH_MAX_IMAGES || curBytes + img.blob.size > BATCH_MAX_BYTES)) {
         groups.push(cur);
         cur = [];
@@ -481,27 +469,47 @@ Many consecutive images may contain no text at all (just artwork or empty space)
       curBytes += img.blob.size;
     }
     if (cur.length) groups.push(cur);
+    return groups;
+  };
 
-    const next = [];
-    for (const group of groups) {
-      let perImage = null;
+  // Một vòng gửi lại theo lô. Trả về:
+  // empty: ảnh model đã trả lời nhưng không có khối nào (hoặc thiếu trong kết quả)
+  // failed: ảnh có yêu cầu bị lỗi (mạng, quota, JSON hỏng), không tính vào ngưỡng
+  const runRecheckRound = async (imgs, round) => {
+    const empty = [], failed = [];
+    for (const group of makeGroups(imgs)) {
+      let perImage;
       try {
         perImage = await askBatch(group, RECHECK_HINT);
       } catch (err) {
         console.error(`[OCR] lô kiểm tra lại (vòng ${round}) lỗi`, err);
-        if (last) notify(tabId, { type: 'SHOW_ERROR', error: err.message });
-      }
-      if (!perImage) {
-        if (!last) next.push(...group); // lỗi mạng/quá tải: thử lại ở vòng sau
+        failed.push(...group);
         continue;
       }
       for (let i = 0; i < group.length; i++) {
-        const blocks = perImage[i]; // vòng cuối: rỗng/thiếu thì thôi, không gọi thêm
+        const blocks = perImage[i];
         if (blocks && blocks.length) await showBlocks(group[i], blocks, false, round);
-        else if (!last) next.push(group[i]);
+        else empty.push(group[i]);
       }
     }
-    pending = next;
+    return { empty, failed };
+  };
+
+  // Sau vòng 1: suspects là ảnh rỗng/thiếu do model trả lời
+  let emptyImgs = suspects;
+  let failedImgs = [];
+
+  // Vòng 2 và 3: gửi lại theo lô
+  for (let round = 2; round <= 3; round++) {
+    const work = [...emptyImgs, ...failedImgs];
+    if (!work.length) break;
+    ({ empty: emptyImgs, failed: failedImgs } = await runRecheckRound(work, round));
+  }
+
+  // Vòng 4: chỉ khi vòng 3 còn hơn 1 ảnh rỗng. Chạy xong thì dừng.
+  if (emptyImgs.length > 1) {
+    const work = [...emptyImgs, ...failedImgs];
+    await runRecheckRound(work, EXTRA_ROUND);
   }
 
   for (const img of loaded.filter((x) => x.tall)) {
