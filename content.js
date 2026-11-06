@@ -41,6 +41,9 @@
       case 'OVERLAY_IMAGE':   overlayImage(msg); break;
       case 'TRANSLATE_ALL_START': collectAndTranslateAll(msg.urls); break;
       case 'SHOW_INFO':       showPanel(msg.text, null); break;
+      case 'FETCH_BLOB':
+        blobUrlToDataUrl(msg.url).then((dataUrl) => sendResponse({ dataUrl }), (err) => sendResponse({ error: String(err && err.message || err) }));
+        return true;
     }
   });
 
@@ -341,19 +344,74 @@
     });
   }
 
+  // Đọc ảnh blob: ngay trong trang (cùng origin nên fetch được), trả về data URL.
+  // Định dạng ngoài png/jpeg/webp (gif, avif...) được vẽ lại thành PNG.
+  const GEMINI_MIMES = ['image/png', 'image/jpeg', 'image/webp'];
+  function readAsDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = () => reject(fr.error);
+      fr.readAsDataURL(blob);
+    });
+  }
+  async function blobUrlToDataUrl(url) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const blob = await res.blob();
+      const mime = (blob.type || '').split(';')[0];
+      if (GEMINI_MIMES.includes(mime)) return await readAsDataUrl(blob);
+      const bmp = await createImageBitmap(blob);
+      const c = document.createElement('canvas');
+      c.width = bmp.width;
+      c.height = bmp.height;
+      c.getContext('2d').drawImage(bmp, 0, 0);
+      bmp.close();
+      return c.toDataURL('image/png');
+    } catch (err) {
+      // blob đã bị thu hồi hoặc bị CSP chặn: vẽ lại từ thẻ <img> đang hiển thị
+      const img = findImage(url);
+      if (!img || !img.naturalWidth) throw err;
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
+      return c.toDataURL('image/png');
+    }
+  }
+
+  // Ảnh thu nhỏ cho side panel (side panel không mở được blob: của trang)
+  function makeThumb(img) {
+    try {
+      const w = 160;
+      const sh = Math.min(img.naturalHeight, img.naturalWidth * 3);
+      const h = Math.max(1, Math.round((w * sh) / img.naturalWidth));
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, img.naturalWidth, sh, 0, 0, w, h);
+      return c.toDataURL('image/jpeg', 0.7);
+    } catch (_) {
+      return null;
+    }
+  }
+
   // Danh sách ảnh đủ lớn trên trang, không trùng URL
   function collectImageUrls() {
     const seen = new Set();
     const out = [];
     for (const img of document.images) {
       const src = img.currentSrc || img.src;
-      if (!src || !/^(https?:|data:image\/)/.test(src)) continue;
+      if (!src || !/^(https?:|data:image\/|blob:)/.test(src)) continue;
       if (seen.has(src)) continue;
       const r = img.getBoundingClientRect();
       if (r.width < 120 || r.height < 120) continue;
       if (img.naturalWidth < 120) continue;
       seen.add(src);
-      out.push({ url: src, w: img.naturalWidth, h: img.naturalHeight });
+      const item = { url: src, w: img.naturalWidth, h: img.naturalHeight };
+      if (src.startsWith('blob:')) item.thumb = makeThumb(img);
+      out.push(item);
     }
     return out;
   }

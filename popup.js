@@ -180,7 +180,7 @@ function render() {
     };
 
     const img = document.createElement('img');
-    img.src = it.url;
+    img.src = it.thumb || it.url;
     img.alt = '';
     img.loading = 'lazy';
 

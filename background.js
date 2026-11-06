@@ -437,6 +437,22 @@ const BATCH_MAX_IMAGES = 8; // lô nhỏ: model lite hay trả "no text" hàng l
 const BATCH_MAX_BYTES = 10 * 1024 * 1024;
 const EXTRA_ROUND = 4; // vòng cuối: chỉ chạy khi vòng 3 còn > 1 ảnh rỗng; chạy xong thì dừng
 
+// Tải ảnh thành Blob. Ảnh blob: chỉ đọc được trong trang tạo ra nó,
+// nên nhờ content script đọc giúp rồi gửi về dưới dạng data URL.
+async function loadImageBlob(tabId, srcUrl) {
+  if (srcUrl.startsWith('blob:')) {
+    if (tabId == null) throw new Error('Thiếu tab để đọc ảnh blob:');
+    const r = await chrome.tabs.sendMessage(tabId, { type: 'FETCH_BLOB', url: srcUrl }).catch(() => null);
+    if (!r || r.error || !r.dataUrl) {
+      throw new Error('Không đọc được ảnh blob:' + (r && r.error ? ' (' + r.error + ')' : ''));
+    }
+    return await (await fetch(r.dataUrl)).blob();
+  }
+  const res = await fetch(srcUrl);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.blob();
+}
+
 // Dịch tất cả ảnh: gửi nhiều ảnh trong một yêu cầu, chia lô khi quá nhiều hoặc quá nặng
 async function translateAllGemini(tabId, urls) {
   const { targetLang } = await getSettings();
@@ -447,9 +463,7 @@ async function translateAllGemini(tabId, urls) {
   const loaded = [];
   for (const srcUrl of list) {
     try {
-      const res = await fetch(srcUrl);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const blob = await res.blob();
+      const blob = await loadImageBlob(tabId, srcUrl);
       const mime = (blob.type || 'image/png').split(';')[0];
       if (!['image/png', 'image/jpeg', 'image/webp'].includes(mime)) throw new Error(`định dạng ${mime}`);
       const bmp = await createImageBitmap(blob);
@@ -915,11 +929,9 @@ async function geminiImageItems(blob, mime, apiKey, targetLang) {
 }
 
 // Ảnh chuột phải: Gemini trả về khung, đổi sang toạ độ pixel rồi lấy màu nền
-async function geminiImageBlocks(srcUrl, targetLang) {
+async function geminiImageBlocks(tabId, srcUrl, targetLang) {
   const key = await getGeminiKey();
-  const res = await fetch(srcUrl);
-  if (!res.ok) throw new Error(`Không tải được ảnh (HTTP ${res.status})`);
-  const blob = await res.blob();
+  const blob = await loadImageBlob(tabId, srcUrl);
   const mime = (blob.type || 'image/png').split(';')[0];
   if (!['image/png', 'image/jpeg', 'image/webp'].includes(mime)) {
     throw new Error(`Gemini không hỗ trợ định dạng ${mime}`);
@@ -954,13 +966,10 @@ async function geminiRegion({ dataUrl, rect, dpr }, targetLang) {
 async function runImageViewer(tabId, srcUrl) {
   try {
     if (!srcUrl) throw new Error('Không lấy được đường dẫn ảnh.');
-    if (srcUrl.startsWith('blob:')) {
-      throw new Error('Ảnh dạng blob: không tải lại được. Hãy dùng Ctrl+C+C để chọn vùng.');
-    }
     const { targetLang } = await getSettings();
     notify(tabId, { type: 'SHOW_LOADING' });
 
-    const { items, width, height } = await geminiImageBlocks(srcUrl, targetLang);
+    const { items, width, height } = await geminiImageBlocks(tabId, srcUrl, targetLang);
     if (!items.length) throw new Error('Gemini không tìm thấy chữ trong ảnh.');
 
     notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl, width, height, items });
