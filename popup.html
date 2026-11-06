@@ -1,23 +1,89 @@
 <!doctype html>
-<html>
+<html lang="vi">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { width: 260px; margin: 0; padding: 14px; font: 14px/1.4 system-ui, sans-serif; color: #111; }
-    h1 { font-size: 15px; margin: 0 0 12px; }
-    label { display: block; font-size: 12px; color: #555; margin-top: 10px; }
-    select, input, button { width: 100%; margin-top: 4px; padding: 7px; font: inherit; box-sizing: border-box; }
-    button { margin-top: 12px; background: #4da3ff; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+    html, body { margin: 0; height: 100%; background: #282c34; color: #dcdfe4; font: 13px/1.4 system-ui, sans-serif; }
+    .wrap { display: flex; flex-direction: column; height: 100%; }
+    .bar { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-bottom: 1px solid #3a3f4b; }
+    .grow { flex: 1; }
+    .count { color: #9aa3b2; font-size: 12px; margin-right: 4px; white-space: nowrap; }
+    .selall { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid #454c5a; border-radius: 6px; background: #353b46; cursor: pointer; white-space: nowrap; user-select: none; }
+    .selall:hover { background: #3f4653; }
+    .selall input { width: 15px; height: 15px; margin: 0; accent-color: #61afef; cursor: pointer; }
+    .selall input:disabled { cursor: default; }
+    .btn { background: #353b46; color: #dcdfe4; border: 1px solid #454c5a; border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; white-space: nowrap; }
+    .btn:hover { background: #3f4653; }
+    .btn:disabled { opacity: .5; cursor: default; }
+    .btn.primary { background: #61afef; border-color: #61afef; color: #111; font-weight: 600; }
+    .btn.icon { padding: 5px 8px; font-size: 15px; line-height: 1; }
+    #list { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
+    .card { position: relative; display: block; border: 1px solid #3a3f4b; border-radius: 8px; background: #2c313a; padding: 6px; cursor: pointer; }
+    .card.off { opacity: .45; }
+    .card img { display: block; width: 100%; height: 220px; object-fit: contain; border-radius: 4px; background: #1e2228; }
+    .card.done { border-color: #3d6b4f; }
+    .card.done img { opacity: .6; }
+    .card input:disabled { cursor: default; }
+    .badge { position: absolute; left: 12px; bottom: 12px; background: #3d6b4f; color: #e8f5ec; font-size: 11px; padding: 2px 8px; border-radius: 4px; display: none; }
+    .card.done .badge { display: inline-block; }
+    .card.notext { border-color: #4a5060; }
+    .card.notext img { opacity: .4; }
+    .card.notext .badge { display: inline-block; background: #4a5060; color: #dcdfe4; }
+    .card input:disabled + img { cursor: default; }
+    .card input { position: absolute; top: 12px; left: 12px; width: 16px; height: 16px; margin: 0; accent-color: #61afef; cursor: pointer; }
+    .dim { position: absolute; right: 12px; top: 12px; background: rgba(0, 0, 0, .6); color: #dcdfe4; font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+    .empty { color: #9aa3b2; text-align: center; margin-top: 40px; }
+    .foot { padding: 10px 12px; border-top: 1px solid #3a3f4b; }
+    .foot .btn { width: 100%; }
+    #modal { position: fixed; inset: 0; background: rgba(0, 0, 0, .55); display: none; align-items: center; justify-content: center; padding: 16px; }
+    #modal.show { display: flex; }
+    .dialog { background: #2c313a; border: 1px solid #3a3f4b; border-radius: 10px; padding: 16px; width: 100%; max-width: 320px; box-sizing: border-box; }
+    .dialog h2 { font-size: 14px; margin: 0 0 8px; }
+    label.lbl { display: block; font-size: 12px; color: #9aa3b2; margin: 10px 0 4px; }
+    select, input[type=password] { width: 100%; padding: 7px; font: inherit; background: #1e2228; color: #dcdfe4; border: 1px solid #3a3f4b; border-radius: 6px; box-sizing: border-box; }
+    .row { display: flex; justify-content: flex-end; margin-top: 14px; }
+    html { color-scheme: dark; }
+    button, select, input { outline: none; }
+    button:focus-visible, select:focus-visible, input:focus-visible { outline: 1px solid #5b6375; outline-offset: 1px; }
+    select:focus, input:focus { border-color: #5b6375; }
+    select option { background: #1e2228; color: #dcdfe4; }
+    select {
+      -webkit-appearance: none; appearance: none;
+      border: 1px solid #3a3f4b;
+      padding-right: 30px;
+      background-color: #1e2228;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%239aa3b2' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
-  <h1><img src="icons/icon32.png" alt="" width="20" height="20" style="vertical-align:-4px;margin-right:6px">AI Image Translate</h1>
-  <label for="targetLang">Dịch sang</label>
-  <select id="targetLang"></select>
-  <label for="geminiKey">Gemini API key</label>
-  <input type="password" id="geminiKey" placeholder="AIza...">
-  <button id="start">Chọn vùng để dịch</button>
-  <button id="translateAll">Dịch tất cả ảnh trên trang</button>
+  <div class="wrap">
+    <div class="bar">
+      <label class="selall"><input type="checkbox" id="selectAllCb"> Chọn hết</label>
+      <span class="grow"></span>
+      <span class="count" id="count"></span>
+      <button class="btn icon" id="refresh" title="Làm mới danh sách ảnh">⟳</button>
+      <button class="btn icon" id="settings" title="Cài đặt">⚙</button>
+    </div>
+    <div id="list"></div>
+    <div class="foot"><button class="btn primary" id="translate">Dịch ảnh đã chọn</button></div>
+  </div>
+
+  <div id="modal">
+    <div class="dialog">
+      <h2>Cài đặt</h2>
+      <label class="lbl" for="targetLang">Dịch sang</label>
+      <select id="targetLang"></select>
+      <label class="lbl" for="geminiKey">Gemini API key</label>
+      <input type="password" id="geminiKey" placeholder="AIza...">
+      <div class="row"><button class="btn primary" id="closeSettings">Xong</button></div>
+    </div>
+  </div>
+
   <script src="popup.js"></script>
 </body>
 </html>

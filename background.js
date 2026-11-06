@@ -1,3 +1,6 @@
+// Mở cài đặt bằng Side Panel khi bấm icon trên thanh công cụ, thay cho popup
+chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true }).catch((err) => console.warn('[sidePanel]', err.message));
+
 const DEFAULTS = { targetLang: 'vi' };
 
 async function getSettings() {
@@ -23,7 +26,87 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
 
 // ---------- Gemini: đọc và dịch bằng mô hình thị giác ----------
-const TARGET_NAMES = { vi: 'Tiếng Việt', en: 'English', ko: 'Korean', ja: 'Japanese', 'zh-CN': 'Simplified Chinese', fr: 'French' };
+const TARGET_NAMES = {
+  'vi': 'Vietnamese',
+  'en': 'English',
+  'zh-CN': 'Simplified Chinese',
+  'zh-TW': 'Traditional Chinese',
+  'ja': 'Japanese',
+  'ko': 'Korean',
+  'th': 'Thai',
+  'id': 'Indonesian',
+  'ms': 'Malay',
+  'fil': 'Filipino',
+  'km': 'Khmer',
+  'lo': 'Lao',
+  'my': 'Burmese',
+  'mn': 'Mongolian',
+  'hi': 'Hindi',
+  'bn': 'Bengali',
+  'ur': 'Urdu',
+  'ta': 'Tamil',
+  'te': 'Telugu',
+  'mr': 'Marathi',
+  'gu': 'Gujarati',
+  'pa': 'Punjabi',
+  'kn': 'Kannada',
+  'ml': 'Malayalam',
+  'ne': 'Nepali',
+  'si': 'Sinhala',
+  'ar': 'Arabic',
+  'fa': 'Persian',
+  'he': 'Hebrew',
+  'tr': 'Turkish',
+  'kk': 'Kazakh',
+  'uz': 'Uzbek',
+  'az': 'Azerbaijani',
+  'ka': 'Georgian',
+  'hy': 'Armenian',
+  'ru': 'Russian',
+  'uk': 'Ukrainian',
+  'be': 'Belarusian',
+  'fr': 'French',
+  'de': 'German',
+  'es': 'Spanish',
+  'pt': 'Portuguese',
+  'it': 'Italian',
+  'nl': 'Dutch',
+  'sv': 'Swedish',
+  'no': 'Norwegian',
+  'da': 'Danish',
+  'fi': 'Finnish',
+  'is': 'Icelandic',
+  'pl': 'Polish',
+  'cs': 'Czech',
+  'sk': 'Slovak',
+  'hu': 'Hungarian',
+  'ro': 'Romanian',
+  'bg': 'Bulgarian',
+  'sr': 'Serbian',
+  'hr': 'Croatian',
+  'sl': 'Slovenian',
+  'et': 'Estonian',
+  'lv': 'Latvian',
+  'lt': 'Lithuanian',
+  'el': 'Greek',
+  'sq': 'Albanian',
+  'mk': 'Macedonian',
+  'bs': 'Bosnian',
+  'ca': 'Catalan',
+  'eu': 'Basque',
+  'gl': 'Galician',
+  'ga': 'Irish',
+  'cy': 'Welsh',
+  'sw': 'Swahili',
+  'am': 'Amharic',
+  'af': 'Afrikaans',
+  'ha': 'Hausa',
+  'yo': 'Yoruba',
+  'ig': 'Igbo',
+  'zu': 'Zulu',
+  'eo': 'Esperanto',
+  'la': 'Latin',
+};
 
 // Key mặc định; key nhập trong popup (nếu có) sẽ được ưu tiên
 
@@ -415,6 +498,9 @@ In "summary", write 3-8 words describing what THAT specific image shows (e.g. "w
 Many consecutive images may contain no text at all (just artwork or empty space): that is normal. Return an empty "blocks" array for them. NEVER move text from one image to another to fill a gap, and never shift blocks to the previous or next image. A block belongs only to the image where its text is actually printed, and its boxes are relative to that image.`;
 
   let ok = 0;
+  // Cập nhật tiến độ lên panel trong trang mỗi khi vẽ xong một ảnh
+  const progress = () => notify(tabId, { type: 'SHOW_INFO', text: `Đang dịch: ${ok}/${list.length} ảnh...` });
+  progress();
   const undrawn = []; // ảnh có khối từ model nhưng không vẽ được
   const drawn = new Set(); // URL ảnh đã vẽ được ít nhất một khối
   const batchErrors = []; // ảnh thuộc lô vòng 1 bị lỗi yêu cầu
@@ -447,10 +533,14 @@ Many consecutive images may contain no text at all (just artwork or empty space)
       if (items.length) {
         notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width: bitmap.width, height: bitmap.height, items });
         ok++;
+        progress();
         drawn.add(img.srcUrl);
+        await markDone(tabId, img.srcUrl);
       } else if (blocks.length) {
         // Model có trả khối nhưng không khối nào vẽ được: ghi lại để xem trong log
         undrawn.push({ url: img.srcUrl, blocks: blocks.length, round });
+        // Không vẽ được khối nào thì coi như không có chữ: bỏ chọn và khoá trong side panel
+        await markState(tabId, 'noText', img.srcUrl);
         console.warn(`[OCR] ảnh không vẽ được khối nào (vòng ${round}, ${blocks.length} khối)`, img.srcUrl);
       }
     } finally {
@@ -542,7 +632,9 @@ Many consecutive images may contain no text at all (just artwork or empty space)
       if (items.length) {
         notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width, height, items });
         ok++;
+        progress();
         drawn.add(img.srcUrl);
+        await markDone(tabId, img.srcUrl);
       } else {
         tallEmpty.push(img.srcUrl);
       }
@@ -565,6 +657,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     ['ảnh rất cao: lỗi', notDrawn(tallErrors)],
     ['không tải được ảnh', list.filter((u) => !loadedUrls.has(u))],
   ];
+  for (const u of [...groups[1][1], ...groups[3][1], ...groups[4][1]]) await markState(tabId, 'noText', u);
   const sumGroups = groups.reduce((n, [, urls]) => n + urls.length, 0);
   console.group(`[OCR] TỔNG KẾT: ${list.length} ảnh | đã vẽ ${drawn.size} | khác ${sumGroups}`);
   for (const [label, urls] of groups) {
@@ -901,7 +994,12 @@ async function translateAll(tabId, urls) {
     notify(tabId, { type: 'SHOW_ERROR', error: 'Không tìm thấy ảnh đủ lớn trên trang.' });
     return;
   }
-  await translateAllGemini(tabId, list);
+  await setJob(tabId, 'running');
+  try {
+    await translateAllGemini(tabId, list);
+  } finally {
+    await setJob(tabId, 'idle');
+  }
 }
 
 // ---------- Phím tắt và chọn vùng ----------
@@ -933,3 +1031,45 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
 function notify(tabId, msg) {
   chrome.tabs.sendMessage(tabId, msg).catch(() => {});
 }
+
+
+// ---------- Trạng thái theo tab cho side panel: đã dịch, không có chữ, đang chạy ----------
+async function markState(tabId, key, url) {
+  try {
+    const store = await chrome.storage.session.get(key);
+    const map = store[key] || {};
+    const set = new Set(map[tabId] || []);
+    set.add(url);
+    map[tabId] = [...set];
+    await chrome.storage.session.set({ [key]: map });
+  } catch (err) {
+    console.warn(`[${key}] không lưu được`, err.message);
+  }
+}
+
+async function markDone(tabId, url) {
+  await markState(tabId, 'done', url);
+}
+
+async function setJob(tabId, status) {
+  await chrome.storage.session.set({ job: { tabId, status } }).catch(() => {});
+}
+
+async function clearTabState(tabId) {
+  const store = await chrome.storage.session.get(['done', 'noText']);
+  for (const key of ['done', 'noText']) {
+    const map = store[key] || {};
+    if (map[tabId]) {
+      delete map[tabId];
+      await chrome.storage.session.set({ [key]: map });
+    }
+  }
+}
+
+// Trang tải lại hoặc tab đóng thì xoá trạng thái của tab đó
+chrome.tabs.onUpdated.addListener(async (tabId, info) => {
+  if (info.status === 'loading') await clearTabState(tabId);
+});
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  await clearTabState(tabId);
+});

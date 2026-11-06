@@ -30,15 +30,16 @@
     lastContextImg = t instanceof Element ? (t.closest('img') || null) : null;
   }, true);
 
-  chrome.runtime.onMessage.addListener((msg) => {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg.type) {
+      case 'LIST_IMAGES':     listPageImages().then(sendResponse); return true;
       case 'START_SELECTION': startSelection(); break;
       case 'SHOW_LOADING':    showPanel('Đang nhận dạng và dịch...', null); break;
       case 'SHOW_RESULT':     showPanel(msg.translated, msg.original); break;
       case 'SHOW_ERROR':      showPanel('⚠ ' + msg.error, null); break;
       case 'HIDE_PANEL':      removePanel(); break;
       case 'OVERLAY_IMAGE':   overlayImage(msg); break;
-      case 'TRANSLATE_ALL_START': collectAndTranslateAll(); break;
+      case 'TRANSLATE_ALL_START': collectAndTranslateAll(msg.urls); break;
       case 'SHOW_INFO':       showPanel(msg.text, null); break;
     }
   });
@@ -340,12 +341,10 @@
     });
   }
 
-  async function collectAndTranslateAll() {
-    showPanel('Đang tải các ảnh trên trang...', null);
-    await Promise.all([...document.images].map(waitLoaded));
-
+  // Danh sách ảnh đủ lớn trên trang, không trùng URL
+  function collectImageUrls() {
     const seen = new Set();
-    const urls = [];
+    const out = [];
     for (const img of document.images) {
       const src = img.currentSrc || img.src;
       if (!src || !/^(https?:|data:image\/)/.test(src)) continue;
@@ -354,9 +353,27 @@
       if (r.width < 120 || r.height < 120) continue;
       if (img.naturalWidth < 120) continue;
       seen.add(src);
-      urls.push(src);
+      out.push({ url: src, w: img.naturalWidth, h: img.naturalHeight });
     }
-    showPanel(`Đang dịch ${urls.length} ảnh trên trang...`, null);
+    return out;
+  }
+
+  async function listPageImages() {
+    await Promise.all([...document.images].map(waitLoaded));
+    return { images: collectImageUrls() };
+  }
+
+  // selected: danh sách URL người dùng đã chọn trong side panel; không có thì lấy tất cả
+  async function collectAndTranslateAll(selected) {
+    showPanel('Đang tải các ảnh trên trang...', null);
+    let urls;
+    if (Array.isArray(selected)) {
+      urls = selected;
+    } else {
+      await Promise.all([...document.images].map(waitLoaded));
+      urls = collectImageUrls().map((x) => x.url);
+    }
+    showPanel(`Đang dịch ${urls.length} ảnh...`, null);
     chrome.runtime.sendMessage({ type: 'TRANSLATE_ALL', urls });
   }
 
