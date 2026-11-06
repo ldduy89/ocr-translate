@@ -192,6 +192,15 @@ function render() {
     badge.className = 'badge';
     badge.textContent = it.done ? '✓ Đã dịch' : 'Không có chữ';
 
+    // Ảnh đã dịch / không có chữ: bấm vào thì cuộn trang tới đúng ảnh đó
+    if (locked) {
+      card.title = 'Bấm để cuộn tới ảnh này trên trang';
+      card.onclick = (e) => {
+        e.preventDefault();
+        if (currentTabId != null) chrome.tabs.sendMessage(currentTabId, { type: 'SCROLL_TO_IMAGE', url: it.url }).catch(() => {});
+      };
+    }
+
     card.append(cb, img, dim, badge);
     listEl.appendChild(card);
   }

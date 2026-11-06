@@ -20,7 +20,11 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === 'translate-image' && tab?.id) {
-    runImageViewer(tab.id, info.srcUrl);
+    // Để trang xử lý như bấm icon trên ảnh (icon xoay ngay trên ảnh). Trang không nhận (không có thẻ <img>,
+    // chưa nạp content script...) thì dùng cách cũ: dịch và hiện bảng ở góc dưới phải
+    chrome.tabs.sendMessage(tab.id, { type: 'MENU_TRANSLATE', srcUrl: info.srcUrl })
+      .then((r) => { if (!r?.handled) runImageViewer(tab.id, info.srcUrl); })
+      .catch(() => runImageViewer(tab.id, info.srcUrl));
   }
 });
 
@@ -1040,6 +1044,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return { type: 'OCR', dataUrl, rect: msg.rect, dpr: msg.dpr };
     });
   }
+  if (msg.type === 'REBIND_URL' && sender.tab) {
+    // Trang đổi link ảnh đã dịch: đổi khoá URL ở trạng thái "Đã dịch" để side panel khớp ảnh mới
+    renameDone(sender.tab.id, msg.oldUrl, msg.newUrl);
+    return false;
+  }
   if (msg.type === 'TRANSLATE_ALL' && sender.tab) {
     translateAll(sender.tab.id, msg.urls || []);
   }
@@ -1070,6 +1079,19 @@ async function markState(tabId, key, url) {
 
 async function markDone(tabId, url) {
   await markState(tabId, 'done', url);
+}
+
+async function renameDone(tabId, oldUrl, newUrl) {
+  try {
+    const store = await chrome.storage.session.get('done');
+    const map = store.done || {};
+    const list = (map[tabId] || []).filter((u) => u !== oldUrl);
+    if (!list.includes(newUrl)) list.push(newUrl);
+    map[tabId] = list;
+    await chrome.storage.session.set({ done: map });
+  } catch (err) {
+    console.warn('[done] không đổi được URL', err.message);
+  }
 }
 
 async function setJob(tabId, status) {

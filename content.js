@@ -41,6 +41,8 @@
       case 'OVERLAY_IMAGE':   overlayImage(msg); break;
       case 'TRANSLATE_ALL_START': collectAndTranslateAll(msg.urls); break;
       case 'SHOW_INFO':       showPanel(msg.text, null); break;
+      case 'SCROLL_TO_IMAGE': scrollToImage(msg.url); break;
+      case 'MENU_TRANSLATE':  sendResponse({ handled: translateFromMenu(msg.srcUrl) }); break;
       case 'FETCH_BLOB':
         blobUrlToDataUrl(msg.url).then((dataUrl) => sendResponse({ dataUrl }), (err) => sendResponse({ error: String(err && err.message || err) }));
         return true;
@@ -158,6 +160,19 @@
     return [...document.images].find((i) => i.currentSrc === srcUrl || i.src === srcUrl) || null;
   }
 
+  // Cuộn trang (và các div cuộn chứa ảnh) tới ảnh có địa chỉ srcUrl. Dùng khi bấm ảnh đã dịch / không có chữ ở side panel.
+  // Ảnh cao hơn khung nhìn thì đưa đầu ảnh lên đầu khung; ảnh vừa khung thì canh giữa.
+  function scrollToImage(srcUrl) {
+    const entry = overlayEntries.get(srcUrl);
+    const img = (entry && entry.img.isConnected) ? entry.img : findImage(srcUrl);
+    if (!img) return false;
+    const host = findScrollHost(img);
+    const viewH = host ? host.clientHeight : window.innerHeight;
+    const tall = img.getBoundingClientRect().height > viewH * 0.9;
+    img.scrollIntoView({ behavior: 'smooth', block: tall ? 'start' : 'center', inline: 'nearest' });
+    return true;
+  }
+
   // Đo bằng canvas: ngắt dòng theo độ rộng khung, rồi chọn cỡ chữ lớn nhất vừa khung
   const FONT_FAMILY = 'system-ui, "Segoe UI", Roboto, sans-serif';
   let measureCtx = null;
@@ -256,23 +271,88 @@
     releaseHost(entry.host);
   }
 
+  function aspectOf(im) {
+    if (im.naturalWidth > 0) return im.naturalWidth / im.naturalHeight;
+    const r = im.getBoundingClientRect();
+    return r.width / Math.max(1, r.height);
+  }
+
+  // Danh sách <img> theo thứ tự DOM trong khung scroll (hoặc cả trang nếu ảnh không nằm trong div cuộn)
+  function imagesIn(container) {
+    return container === document ? [...document.images] : [...container.querySelectorAll('img')];
+  }
+
+  // Ghi nhớ ảnh đã dịch là ảnh thứ mấy trong khung scroll của nó
+  function snapshotEntry(entry) {
+    const im = entry.img;
+    entry.cont = findScrollHost(im) || document;
+    entry.ord = imagesIn(entry.cont).indexOf(im);
+  }
+
+  // Tìm lại ảnh thay thế: lấy đúng ảnh cùng số thứ tự trong khung scroll (vd đã dịch ảnh thứ 5 thì lấy ảnh thứ 5).
+  // Ảnh đó chưa có hoặc khác tỉ lệ khung hình (lệch >5%) thì trả về null: ẩn tạm và thử lại, không đoán sang ảnh khác.
+  function findByPosition(entry) {
+    if (!(entry.ord >= 0)) return null;
+    const cont = entry.cont && (entry.cont === document || entry.cont.isConnected) ? entry.cont : document;
+    const cand = imagesIn(cont)[entry.ord];
+    if (!cand || !cand.isConnected) return null;
+    for (const e of overlayEntries.values()) if (e !== entry && e.img === cand) return null; // đã gắn bản dịch khác
+    const aspectOld = entry.width / entry.height;
+    return Math.abs(aspectOf(cand) / aspectOld - 1) <= 0.05 ? cand : null;
+  }
+
+  // Gắn bản dịch sang <img> mới / link mới và cập nhật khoá URL (kể cả trạng thái "Đã dịch" ở side panel).
+  // Khác tỉ lệ ảnh nghĩa là ảnh khác hẳn: gỡ bản dịch cho khỏi sai chỗ.
+  function rebindEntry(entry, newImg) {
+    const aspectOld = entry.width / entry.height;
+    const aspectNew = newImg.naturalWidth > 0
+      ? newImg.naturalWidth / newImg.naturalHeight
+      : newImg.getBoundingClientRect().width / Math.max(1, newImg.getBoundingClientRect().height);
+    if (Math.abs(aspectNew / aspectOld - 1) > 0.05) {
+      removeEntry(entry);
+      return false;
+    }
+    const oldUrl = entry.srcUrl;
+    const newUrl = imgKey(newImg);
+    if (!newUrl) return false; // ảnh mới chưa có link (đang tải): thử lại lần sau
+    if (newImg !== entry.img) {
+      layoutObserver.unobserve(entry.img);
+      entry.img = newImg;
+      layoutObserver.observe(newImg);
+    }
+    if (newUrl !== oldUrl) {
+      const other = overlayEntries.get(newUrl);
+      if (other && other !== entry) removeEntry(other);
+      overlayEntries.delete(oldUrl);
+      entry.srcUrl = newUrl;
+      entry.layer.dataset.src = newUrl;
+      overlayEntries.set(newUrl, entry);
+      try { chrome.runtime.sendMessage({ type: 'REBIND_URL', oldUrl, newUrl }, () => void chrome.runtime.lastError); } catch (_) {}
+    }
+    entry.sizeKey = '';
+    return true;
+  }
+
   function layoutOverlay(entry) {
     const { layer, width, height, items } = entry;
     let img = entry.img;
     if (!img.isConnected) {
       // Trang dựng lại <img> (thường gặp khi cửa sổ đổi cỡ, vd mở side panel): tìm lại ảnh theo URL
       // và gắn bản dịch vào đó, không xoá bản dịch. Chưa thấy thì ẩn tạm và thử lại ở lần kiểm tra sau.
-      const again = findImage(entry.srcUrl);
-      if (again && again.isConnected) {
-        layoutObserver.unobserve(img);
-        entry.img = img = again;
-        layoutObserver.observe(img);
-        entry.sizeKey = '';
+      // (URL cũ không còn thì tìm theo vị trí/kích thước, rồi cập nhật URL mới vào bản dịch)
+      const again = findImage(entry.srcUrl) || findByPosition(entry);
+      if (again && again.isConnected && rebindEntry(entry, again)) {
+        img = entry.img;
       } else {
-        layer.style.display = 'none';
-        if (entry.pin) entry.pin.el.style.display = 'none';
+        if (overlayEntries.get(entry.srcUrl) === entry) { // chưa bị gỡ vì khác tỉ lệ: ẩn tạm, thử lại sau
+          layer.style.display = 'none';
+          if (entry.pin) entry.pin.el.style.display = 'none';
+        }
         return;
       }
+    } else if (imgKey(img) && imgKey(img) !== entry.srcUrl) {
+      // Cùng thẻ <img> nhưng trang đổi sang link khác: cập nhật link, giữ bản dịch
+      if (!rebindEntry(entry, img)) return;
     }
     const rect = img.getBoundingClientRect();
     const sx = rect.width / width;
@@ -314,6 +394,7 @@
     const sizeKey = rect.width.toFixed(1) + 'x' + rect.height.toFixed(1);
     if (entry.sizeKey === sizeKey) return;
     entry.sizeKey = sizeKey;
+    snapshotEntry(entry);
 
     layer.textContent = '';
     const pad = 2;
@@ -369,6 +450,7 @@
 
   function layoutAllOverlays() {
     for (const entry of [...overlayEntries.values()]) layoutOverlay(entry);
+    updateAllPendingPins();
   }
 
   function scheduleLayout() {
@@ -391,7 +473,7 @@
   function startPolling() {
     if (pollTimer) return;
     pollTimer = setInterval(() => {
-      if (!overlayEntries.size) {
+      if (!overlayEntries.size && !pendingPins.size) {
         clearInterval(pollTimer);
         pollTimer = null;
         return;
@@ -428,6 +510,8 @@
     overlayEntries.set(srcUrl, entry);
     layoutObserver.observe(img);
     layoutOverlay(entry);
+    flashPin(entry);
+    removePendingPin(srcUrl); // nút cố định của bản dịch (updatePin trong layoutOverlay) thay vào ngay
     if (pillImg === img) hidePill(); // nút rê chuột nhường chỗ cho nút cố định
     startPolling();
   }
@@ -546,7 +630,7 @@
   const BTN_TEXT = {
     idle: 'Dịch ảnh',
     loading: 'Đang dịch...',
-    shown: 'Xem ảnh gốc',
+    shown: '✓ Bản dịch',
     hidden: 'Xem bản dịch',
   };
   const BTN_MIN = 120;           // chỉ áp dụng cho ảnh hiển thị ≥ 120px mỗi chiều
@@ -576,7 +660,16 @@
     .ico{display:flex;width:24px;height:24px}
     .ico img{width:24px;height:24px;border-radius:6px}
     .pill[data-state=loading] .ico{animation:spin 1s linear infinite}
-    @keyframes spin{to{transform:rotate(360deg)}}`;
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .pill[data-state=shown]{background:#1f9d55;color:#fff}
+    .pill[data-state=hidden]{background:#2f7df6;color:#fff}
+    .pill[data-state=shown] .ico img,.pill[data-state=hidden] .ico img{box-shadow:0 0 0 2px #fff}
+    .pill.flash{animation:flash .9s ease-out 2}
+    @keyframes flash{
+      0%{transform:scale(.85);box-shadow:0 0 0 0 rgba(31,157,85,.9)}
+      30%{transform:scale(1.12)}
+      65%{transform:scale(1);box-shadow:0 0 0 16px rgba(31,157,85,0)}
+      100%{transform:scale(1);box-shadow:0 2px 10px rgba(0,0,0,.3)}}`;
 
   function ensurePill() {
     if (pillHost && pillHost.isConnected) return pill;
@@ -607,6 +700,7 @@
     ico.appendChild(im);
     const label = document.createElement('span');
     el.append(ico, label);
+    el.addEventListener('animationend', (e) => { if (e.animationName === 'flash') el.classList.remove('flash'); });
     // Không cho sự kiện lọt xuống trang (tránh lật trang/zoom ảnh khi bấm nút)
     for (const t of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'dblclick', 'contextmenu']) {
       el.addEventListener(t, (e) => e.stopPropagation());
@@ -631,6 +725,10 @@
 
   function updatePin(entry) {
     const v = visibleRect(entry.img);
+    if (pendingUrls.has(entry.srcUrl)) { // đang dịch lại: nút xoay thay chỗ nút này
+      if (entry.pin) entry.pin.el.style.display = 'none';
+      return;
+    }
     if (!pillsEnabled || v.r - v.l < BTN_MIN || v.b - v.t < 40) { // ảnh cuộn ra khỏi màn hình / quá nhỏ
       if (entry.pin) entry.pin.el.style.display = 'none';
       return;
@@ -639,12 +737,65 @@
     const state = entry.hidden ? 'hidden' : 'shown';
     pin.el.dataset.state = state;
     pin.label.textContent = BTN_TEXT[state];
+    pin.el.title = state === 'shown' ? 'Bấm để xem ảnh gốc' : 'Bấm để xem bản dịch';
     pin.el.style.display = 'flex';
     pin.el.style.left = Math.max(v.l, v.r - pin.el.offsetWidth - 10) + 'px';
     pin.el.style.top = v.t + 10 + 'px';
   }
 
+  // Vừa dịch xong: nút nháy/nhún vài lần cho dễ thấy, rồi đứng yên
+  function flashPin(entry) {
+    const el = entry.pin && entry.pin.el;
+    if (!el || el.style.display === 'none') return;
+    el.classList.remove('flash');
+    void el.offsetWidth; // khởi động lại animation
+    el.classList.add('flash');
+  }
+
   function imgKey(img) { return img.currentSrc || img.src; }
+
+  // Ảnh đang dịch bằng nút: giữ nút (icon xoay) hiện cố định ở góc trên phải phần ảnh đang thấy,
+  // không phụ thuộc rê chuột, đến khi dịch xong (nút cố định của bản dịch sẽ thay vào) hoặc lỗi.
+  const pendingPins = new Map(); // srcUrl -> { img, btn }
+
+  function addPendingPin(key, img) {
+    removePendingPin(key);
+    ensurePill();
+    const btn = makeButton(() => {});
+    btn.el.dataset.state = 'loading';
+    btn.label.textContent = BTN_TEXT.loading;
+    pendingPins.set(key, { img, btn });
+    updatePendingPin(key);
+    startPolling();
+  }
+
+  function removePendingPin(key) {
+    const p = pendingPins.get(key);
+    if (!p) return;
+    p.btn.el.remove();
+    pendingPins.delete(key);
+  }
+
+  function updatePendingPin(key) {
+    const p = pendingPins.get(key);
+    if (!p) return;
+    if (!p.img.isConnected) { // trang dựng lại thẻ <img>: tìm lại theo URL
+      const again = findImage(key);
+      if (again) p.img = again;
+    }
+    const v = p.img.isConnected ? visibleRect(p.img) : null;
+    if (!pillsEnabled || !v || v.r - v.l < BTN_MIN || v.b - v.t < 40) { // đang ngoài màn hình: ẩn tạm, cuộn lại sẽ hiện
+      p.btn.el.style.display = 'none';
+      return;
+    }
+    p.btn.el.style.display = 'flex';
+    p.btn.el.style.left = Math.max(v.l, v.r - p.btn.el.offsetWidth - 10) + 'px';
+    p.btn.el.style.top = v.t + 10 + 'px';
+  }
+
+  function updateAllPendingPins() {
+    for (const key of [...pendingPins.keys()]) updatePendingPin(key);
+  }
 
   function pillState(key) {
     if (pendingUrls.has(key)) return 'loading';
@@ -673,9 +824,35 @@
       refreshPill();
       return;
     }
+    startTranslate(img, key);
+  }
+
+  // Menu chuột phải "dịch ảnh này": chạy y như bấm nút trên ảnh (icon xoay trên ảnh, không mở bảng ở góc dưới phải).
+  // Ảnh đã có bản dịch thì không dịch lại. Trả về false nếu không tìm thấy thẻ <img>
+  // (vd ảnh nền CSS, ảnh trong iframe) để background dùng cách cũ.
+  function translateFromMenu(srcUrl) {
+    const img = findImage(srcUrl);
+    if (!img) return false;
+    const key = imgKey(img);
+    if (!key) return false;
+    const entry = overlayEntries.get(key);
+    if (entry) { // đã dịch rồi: không dịch lại; đang xem ảnh gốc thì bật lại bản dịch
+      if (entry.hidden) {
+        entry.hidden = false;
+        entry.layer.style.display = 'block';
+        updatePin(entry);
+      }
+      return true;
+    }
+    if (!pendingUrls.has(key)) startTranslate(img, key);
+    return true;
+  }
+
+  function startTranslate(img, key) {
     pendingUrls.add(key);
-    refreshPill();
-    const done = () => { pendingUrls.delete(key); refreshPill(); };
+    addPendingPin(key, img);
+    hidePill(); // nút rê chuột nhường chỗ cho nút cố định đang xoay
+    const done = () => { pendingUrls.delete(key); removePendingPin(key); refreshPill(); };
     try {
       chrome.runtime.sendMessage({ type: 'TRANSLATE_ONE', srcUrl: key }, () => {
         void chrome.runtime.lastError;
@@ -740,7 +917,7 @@
     if (force !== true) moveQueued = false;
     if (!pillsEnabled || lastX < 0) return;
     let img = imgAt(lastX, lastY);
-    if (img && overlayEntries.has(imgKey(img))) img = null; // ảnh đã dịch đã có nút cố định
+    if (img && (overlayEntries.has(imgKey(img)) || pendingUrls.has(imgKey(img)))) img = null; // ảnh đã dịch / đang dịch đã có nút cố định
     if (img) {
       clearTimeout(hideTimer);
       hideTimer = null;
