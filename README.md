@@ -1,1 +1,1 @@
-# ocr-translate
+# AI Image Translate

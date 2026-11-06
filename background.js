@@ -9,7 +9,7 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: 'translate-image',
-      title: 'Dịch ảnh này bằng Gemini',
+      title: 'AI Image Translate: dịch ảnh này',
       contexts: ['image'],
     });
   });
@@ -260,10 +260,10 @@ function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
   }
   // Vùng chữ gần như trống (không có nét chữ nào): khối bị gán nhầm sang ảnh này -> bỏ
   const ink = inkBounds(data, W, raw, bg);
-  // Chế độ chặt (khối do vòng kiểm tra lại trả về, dễ bị model "bịa"): vùng chữ thật phải có nền khá đồng màu
+  // Chế độ chặt (chỉ dùng cho khối của vòng cuối, dễ bị model "bịa"): vùng chữ thật phải có nền khá đồng màu
   // và có lượng nét chữ hợp lý; vùng tranh vẽ/nhiễu bị loại thay vì vẽ sub đè lên tranh.
   if (strict && ink && (bg.frac < 0.35 || ink.count / ink.area < 0.015)) {
-    console.warn('[OCR] bỏ khối (vòng kiểm tra lại): vùng này không giống chữ trong bong bóng', { original: b.original, bgFrac: bg.frac, inkRatio: ink.count / ink.area });
+    console.warn('[OCR] bỏ khối (vòng kiểm tra lại): vùng này không giống chữ trong bong bóng (vòng cuối)', { original: b.original, bgFrac: bg.frac, inkRatio: ink.count / ink.area });
     return null;
   }
   if (!ink || ink.count < Math.max(20, ink.area * 0.001)) {
@@ -424,7 +424,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
   const showBlocks = async (img, blocks, canRecheck, round = 1) => {
     const bitmap = await createImageBitmap(img.blob);
     try {
-      let items = itemsFromBlocks(blocks, bitmap, round > 1);
+      let items = itemsFromBlocks(blocks, bitmap, round === MAX_ROUNDS); // chỉ kiểm tra chặt ở vòng cuối
       console.log(`[OCR] vòng ${round}: ${blocks.length} khối -> vẽ ${items.length}`, img.srcUrl);
       if (!items.length && blocks.length && canRecheck) {
         // Có khối nhưng vùng chữ đều trống trên ảnh này: nhiều khả năng bị gán nhầm ảnh -> hỏi lại riêng ảnh này
@@ -465,7 +465,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
   }
 
   // Vòng 2..MAX_ROUNDS: gom mọi ảnh còn bị nghi từ tất cả các lô, gửi lại theo lô (ít yêu cầu nhất có thể).
-  // Ảnh có chữ thì vẽ và rời danh sách; ảnh vẫn rỗng/lỗi chuyển sang vòng sau. Hết vòng cuối mà vẫn rỗng thì coi là không có chữ.
+  // Ảnh có chữ thì vẽ và rời danh sách; ảnh vẫn rỗng/lỗi chuyển sang vòng sau. Hết vòng cuối mà vẫn rỗng/thiếu thì bỏ, không gọi thêm.
   let pending = suspects;
   for (let round = 2; round <= MAX_ROUNDS && pending.length; round++) {
     const last = round === MAX_ROUNDS;
@@ -496,17 +496,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
         continue;
       }
       for (let i = 0; i < group.length; i++) {
-        let blocks = perImage[i];
-        if (blocks === null && last) {
-          // Vòng cuối mà lô vẫn không trả kết quả cho ảnh này: gửi riêng
-          try {
-            const b64 = bytesToBase64(new Uint8Array(await group[i].blob.arrayBuffer()));
-            blocks = await callGemini(apiKey, b64, group[i].mime, targetLang);
-          } catch (err) {
-            console.warn('[Gemini] thử lại ảnh lẻ lỗi', group[i].srcUrl, err.message);
-            blocks = [];
-          }
-        }
+        const blocks = perImage[i]; // vòng cuối: rỗng/thiếu thì thôi, không gọi thêm
         if (blocks && blocks.length) await showBlocks(group[i], blocks, false, round);
         else if (!last) next.push(group[i]);
       }
