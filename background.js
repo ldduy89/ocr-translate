@@ -963,16 +963,20 @@ async function geminiRegion({ dataUrl, rect, dpr }, targetLang) {
 
 
 // ---------- Dịch một ảnh (chuột phải) ----------
-async function runImageViewer(tabId, srcUrl) {
+async function runImageViewer(tabId, srcUrl, quiet = false) {
   try {
     if (!srcUrl) throw new Error('Không lấy được đường dẫn ảnh.');
     const { targetLang } = await getSettings();
-    notify(tabId, { type: 'SHOW_LOADING' });
+    if (!quiet) notify(tabId, { type: 'SHOW_LOADING' });
 
     const { items, width, height } = await geminiImageBlocks(tabId, srcUrl, targetLang);
-    if (!items.length) throw new Error('Gemini không tìm thấy chữ trong ảnh.');
+    if (!items.length) {
+      await markState(tabId, 'noText', srcUrl); // side panel: khoá ảnh không có chữ
+      throw new Error('Gemini không tìm thấy chữ trong ảnh.');
+    }
 
     notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl, width, height, items });
+    await markDone(tabId, srcUrl); // side panel: hiện "✓ Đã dịch" và bỏ chọn ảnh này
     notify(tabId, { type: 'HIDE_PANEL' });
     return true;
   } catch (err) {
@@ -1021,7 +1025,15 @@ async function startSelectionOnActiveTab() {
   if (tab?.id) notify(tab.id, { type: 'START_SELECTION' });
 }
 
-chrome.runtime.onMessage.addListener((msg, sender) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'TRANSLATE_ONE' && sender.tab) {
+    // Nút "Dịch ảnh" trên từng ảnh: dịch đúng ảnh đó, báo kết quả về để nút đổi trạng thái
+    runImageViewer(sender.tab.id, msg.srcUrl, true).then(
+      (ok) => sendResponse({ ok }),
+      () => sendResponse({ ok: false })
+    );
+    return true;
+  }
   if (msg.type === 'CAPTURE' && sender.tab) {
     runPipeline(sender.tab.id, async () => {
       const dataUrl = await chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: 'png' });

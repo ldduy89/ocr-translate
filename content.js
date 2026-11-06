@@ -36,7 +36,7 @@
       case 'START_SELECTION': startSelection(); break;
       case 'SHOW_LOADING':    showPanel('Đang nhận dạng và dịch...', null); break;
       case 'SHOW_RESULT':     showPanel(msg.translated, msg.original); break;
-      case 'SHOW_ERROR':      showPanel('⚠ ' + msg.error, null); break;
+      case 'SHOW_ERROR':      showPanel('⚠ ' + msg.error, null); refreshPill(); break;
       case 'HIDE_PANEL':      removePanel(); break;
       case 'OVERLAY_IMAGE':   overlayImage(msg); break;
       case 'TRANSLATE_ALL_START': collectAndTranslateAll(msg.urls); break;
@@ -182,7 +182,7 @@
   // Hệ số cỡ chữ dịch so với bước dòng của chữ gốc (chỉnh nếu thấy chữ dịch to/nhỏ hơn chữ gốc)
   const FONT_CAP = 0.8;
   const LINE_H = 1.0; // khoảng dòng; giữ đủ chỗ cho dấu tiếng Việt, tránh bị cắt
-  const MIN_FONT = 24; // cỡ chữ nhỏ nhất của bản dịch (px)
+  const MIN_FONT = 9; // sàn cứng: dưới mức này chữ không đọc được nữa
 
   // maxSize: cỡ chữ tối đa theo chữ gốc trên hình (có thể không có)
   function fitText(div, text, w, h, maxSize) {
@@ -190,18 +190,17 @@
     let size = Math.max(MIN_FONT, Math.floor(h * 0.8));
     if (maxSize) size = Math.max(MIN_FONT, Math.min(size, Math.floor(maxSize)));
     let lines = [];
+    let fitted = false;
     for (; size >= MIN_FONT; size--) {
       measureCtx.font = `${size}px ${FONT_FAMILY}`;
       lines = wrapWords(text, w);
       const fitsHeight = lines.length * size * LINE_H <= h + 1;
       const fitsWidth = lines.every((l) => measureCtx.measureText(l).width <= w + 1);
-      if (fitsHeight && fitsWidth) break;
+      if (fitsHeight && fitsWidth) { fitted = true; break; }
     }
-    if (size < MIN_FONT) {
-      size = MIN_FONT;
-      measureCtx.font = `${size}px ${FONT_FAMILY}`;
-      lines = wrapWords(text, w);
-    }
+    if (!fitted) size = MIN_FONT; // thật sự không vừa: dùng cỡ nhỏ nhất, chấp nhận tràn nhẹ
+    measureCtx.font = `${size}px ${FONT_FAMILY}`;
+    lines = wrapWords(text, w);
     div.style.fontSize = size + 'px';
     div.style.lineHeight = String(LINE_H);
     div.style.whiteSpace = 'pre';
@@ -252,15 +251,28 @@
   function removeEntry(entry) {
     layoutObserver.unobserve(entry.img);
     entry.layer.remove();
+    if (entry.pin) { entry.pin.el.remove(); entry.pin = null; }
     overlayEntries.delete(entry.srcUrl);
     releaseHost(entry.host);
   }
 
   function layoutOverlay(entry) {
-    const { img, layer, width, height, items } = entry;
+    const { layer, width, height, items } = entry;
+    let img = entry.img;
     if (!img.isConnected) {
-      removeEntry(entry);
-      return;
+      // Trang dựng lại <img> (thường gặp khi cửa sổ đổi cỡ, vd mở side panel): tìm lại ảnh theo URL
+      // và gắn bản dịch vào đó, không xoá bản dịch. Chưa thấy thì ẩn tạm và thử lại ở lần kiểm tra sau.
+      const again = findImage(entry.srcUrl);
+      if (again && again.isConnected) {
+        layoutObserver.unobserve(img);
+        entry.img = img = again;
+        layoutObserver.observe(img);
+        entry.sizeKey = '';
+      } else {
+        layer.style.display = 'none';
+        if (entry.pin) entry.pin.el.style.display = 'none';
+        return;
+      }
     }
     const rect = img.getBoundingClientRect();
     const sx = rect.width / width;
@@ -290,12 +302,13 @@
       top = rect.top + window.scrollY;
     }
     Object.assign(layer.style, {
-      display: rect.width < 1 || rect.height < 1 ? 'none' : 'block',
+      display: entry.hidden || rect.width < 1 || rect.height < 1 ? 'none' : 'block',
       left: left + 'px',
       top: top + 'px',
       width: rect.width + 'px',
       height: rect.height + 'px',
     });
+    updatePin(entry);
 
     // Chỉ dựng lại chữ khi kích thước ảnh đổi; chỉ cuộn hoặc dịch chỗ thì chỉ cần dời lớp
     const sizeKey = rect.width.toFixed(1) + 'x' + rect.height.toFixed(1);
@@ -318,7 +331,7 @@
       if (w < 6 || h < 6) continue;
       // Vùng chữ: elip chỉ dùng phần chữ nhật nằm trong elip (~70%); khung chữ nhật chừa lề đều 7%
       // (tối thiểu 6px) để chữ không sát hoặc bị cắt ở mép
-      const k = ellipse ? 0.7 : 1;
+      const k = ellipse ? 0.78 : 1;
       const mx = ellipse ? (w - w * k) / 2 : Math.max(6, Math.min(w, h) * 0.07);
       const my = ellipse ? (h - h * k) / 2 : Math.max(6, Math.min(w, h) * 0.07);
       const tw = w - 2 * mx;
@@ -340,7 +353,7 @@
         alignItems: 'center',
         justifyContent: 'center',
         textAlign: 'center',
-        overflow: 'visible', // cỡ chữ tối thiểu 24px: cho tràn khung thay vì cắt mất chữ
+        overflow: 'visible', // chỉ tràn khi đã xuống cỡ chữ sàn
         lineHeight: String(LINE_H),
         fontFamily: FONT_FAMILY,
         boxSizing: 'border-box',
@@ -411,10 +424,11 @@
     });
 
     // layoutOverlay tự gắn lớp vào đúng chỗ (body hoặc div cuộn chứa ảnh)
-    const entry = { srcUrl, img, layer, width, height, items, host: undefined, sizeKey: '' };
+    const entry = { srcUrl, img, layer, width, height, items, host: undefined, sizeKey: '', hidden: false };
     overlayEntries.set(srcUrl, entry);
     layoutObserver.observe(img);
     layoutOverlay(entry);
+    if (pillImg === img) hidePill(); // nút rê chuột nhường chỗ cho nút cố định
     startPolling();
   }
 
@@ -525,6 +539,248 @@
     showPanel(`Đang dịch ${urls.length} ảnh...`, null);
     chrome.runtime.sendMessage({ type: 'TRANSLATE_ALL', urls });
   }
+
+  // ================= Nút "Dịch ảnh" chỉ hiện khi rê chuột vào ảnh =================
+  // Một nút duy nhất (Shadow DOM, không bị CSS của trang ảnh hưởng). Rê chuột vào ảnh thì nút hiện ở
+  // góc trên bên phải phần ảnh đang thấy; rời ảnh, cuộn hoặc đổi cỡ cửa sổ thì nút ẩn. Không chạy nền.
+  const BTN_TEXT = {
+    idle: 'Dịch ảnh',
+    loading: 'Đang dịch...',
+    shown: 'Xem ảnh gốc',
+    hidden: 'Xem bản dịch',
+  };
+  const BTN_MIN = 120;           // chỉ áp dụng cho ảnh hiển thị ≥ 120px mỗi chiều
+  const HIDE_DELAY = 150;        // ms chờ trước khi ẩn nút khi chuột rời ảnh
+  const pendingUrls = new Set(); // ảnh đang dịch bằng nút
+  let pillHost = null;
+  let pill = null;               // { el, label }
+  let pillRoot = null;           // shadow root chứa mọi nút
+  let pillImg = null;            // ảnh mà nút đang gắn
+  let pillsEnabled = true;
+  let hideTimer = null;
+  let moveQueued = false;
+  let lastX = -1; // -1: chưa biết vị trí chuột
+  let lastY = -1;
+
+  const ICON_SVG = '<svg viewBox="0 0 24 24" width="24" height="24"><rect width="24" height="24" rx="6" fill="#4da3ff"/>' +
+    '<text x="3.5" y="12.5" font-size="10" font-weight="700" fill="#fff" font-family="sans-serif">文</text>' +
+    '<text x="12.5" y="19.5" font-size="10" font-weight="700" fill="#fff" font-family="sans-serif">A</text></svg>';
+
+  const PILL_CSS = `
+    .pill{position:fixed;display:none;align-items:center;gap:8px;height:34px;padding:0 14px 0 5px;border:0;
+      border-radius:999px;background:#fff;color:#2a3347;font:600 14px/1 system-ui,"Segoe UI",Roboto,sans-serif;
+      box-shadow:0 2px 10px rgba(0,0,0,.3);cursor:pointer;pointer-events:auto;white-space:nowrap;
+      transition:box-shadow .15s}
+    .pill:hover{box-shadow:0 3px 14px rgba(0,0,0,.4)}
+    .pill[data-state=loading]{cursor:progress}
+    .ico{display:flex;width:24px;height:24px}
+    .ico img{width:24px;height:24px;border-radius:6px}
+    .pill[data-state=loading] .ico{animation:spin 1s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}`;
+
+  function ensurePill() {
+    if (pillHost && pillHost.isConnected) return pill;
+    pillHost = document.createElement('div');
+    pillHost.id = 'ocr-pill-host';
+    pillHost.style.cssText = 'all:initial;position:fixed;top:0;left:0;width:0;height:0;z-index:2147483645;';
+    const root = pillHost.attachShadow({ mode: 'closed' });
+    const st = document.createElement('style');
+    st.textContent = PILL_CSS;
+    root.appendChild(st);
+
+    pillRoot = root;
+    pill = makeButton(() => { if (pillImg) onPillClick(pillImg); });
+    (document.body || document.documentElement).appendChild(pillHost);
+    return pill;
+  }
+
+  // Tạo một nút (icon + chữ) trong shadow root; onClick chạy khi bấm
+  function makeButton(onClick) {
+    const el = document.createElement('button');
+    el.className = 'pill';
+    el.type = 'button';
+    const ico = document.createElement('span');
+    ico.className = 'ico';
+    const im = document.createElement('img');
+    try { im.src = chrome.runtime.getURL('icons/icon48.png'); } catch (_) {}
+    im.onerror = () => { ico.innerHTML = ICON_SVG; }; // chưa có icon thì dùng hình dự phòng
+    ico.appendChild(im);
+    const label = document.createElement('span');
+    el.append(ico, label);
+    // Không cho sự kiện lọt xuống trang (tránh lật trang/zoom ảnh khi bấm nút)
+    for (const t of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'dblclick', 'contextmenu']) {
+      el.addEventListener(t, (e) => e.stopPropagation());
+    }
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      onClick();
+    });
+    pillRoot.appendChild(el);
+    return { el, label };
+  }
+
+  // Ảnh đã dịch: nút luôn hiện cố định ở góc trên phải phần ảnh đang thấy (không phụ thuộc rê chuột),
+  // kể cả khi đang xem ảnh gốc, để còn bấm quay lại bản dịch
+  function ensurePin(entry) {
+    if (entry.pin && entry.pin.el.isConnected) return entry.pin;
+    ensurePill(); // đảm bảo host/shadow root đã có
+    entry.pin = makeButton(() => onPillClick(entry.img));
+    return entry.pin;
+  }
+
+  function updatePin(entry) {
+    const v = visibleRect(entry.img);
+    if (!pillsEnabled || v.r - v.l < BTN_MIN || v.b - v.t < 40) { // ảnh cuộn ra khỏi màn hình / quá nhỏ
+      if (entry.pin) entry.pin.el.style.display = 'none';
+      return;
+    }
+    const pin = ensurePin(entry);
+    const state = entry.hidden ? 'hidden' : 'shown';
+    pin.el.dataset.state = state;
+    pin.label.textContent = BTN_TEXT[state];
+    pin.el.style.display = 'flex';
+    pin.el.style.left = Math.max(v.l, v.r - pin.el.offsetWidth - 10) + 'px';
+    pin.el.style.top = v.t + 10 + 'px';
+  }
+
+  function imgKey(img) { return img.currentSrc || img.src; }
+
+  function pillState(key) {
+    if (pendingUrls.has(key)) return 'loading';
+    const e = overlayEntries.get(key);
+    if (!e) return 'idle';
+    return e.hidden ? 'hidden' : 'shown';
+  }
+
+  // Cập nhật chữ/trạng thái của nút theo ảnh đang gắn (không đổi vị trí)
+  function refreshPill() {
+    if (!pill || !pillImg) return;
+    const state = pillState(imgKey(pillImg));
+    pill.el.dataset.state = state;
+    pill.label.textContent = BTN_TEXT[state];
+    pill.el.title = state === 'idle' ? 'Dịch chữ trong ảnh này bằng Gemini' : '';
+  }
+
+  function onPillClick(img) {
+    const key = imgKey(img);
+    if (!key || pendingUrls.has(key)) return;
+    const entry = overlayEntries.get(key);
+    if (entry) { // đã dịch: bấm để chuyển qua lại giữa ảnh gốc và bản dịch
+      entry.hidden = !entry.hidden;
+      entry.layer.style.display = entry.hidden ? 'none' : 'block';
+      updatePin(entry);
+      refreshPill();
+      return;
+    }
+    pendingUrls.add(key);
+    refreshPill();
+    const done = () => { pendingUrls.delete(key); refreshPill(); };
+    try {
+      chrome.runtime.sendMessage({ type: 'TRANSLATE_ONE', srcUrl: key }, () => {
+        void chrome.runtime.lastError;
+        done();
+      });
+    } catch (_) {
+      done(); // extension vừa được tải lại: cần F5 trang
+    }
+  }
+
+  // Phần ảnh đang nhìn thấy: giao của ảnh, khung nhìn và các div cuộn/cắt chứa nó
+  function visibleRect(img) {
+    const r = img.getBoundingClientRect();
+    let l = Math.max(r.left, 0), t = Math.max(r.top, 0);
+    let rt = Math.min(r.right, window.innerWidth), b = Math.min(r.bottom, window.innerHeight);
+    for (let el = img.parentElement; el && el !== document.body && el !== document.documentElement; el = el.parentElement) {
+      if (rt <= l || b <= t) break;
+      const cs = getComputedStyle(el);
+      if (!isClipping(cs.overflowX) && !isClipping(cs.overflowY)) continue;
+      const hr = el.getBoundingClientRect();
+      l = Math.max(l, hr.left); t = Math.max(t, hr.top);
+      rt = Math.min(rt, hr.right); b = Math.min(b, hr.bottom);
+    }
+    return { l, t, r: rt, b };
+  }
+
+  function eligible(img) {
+    const key = imgKey(img);
+    if (!key || !/^(https?:|data:image\/|blob:)/.test(key)) return false;
+    const r = img.getBoundingClientRect();
+    return r.width >= BTN_MIN && r.height >= BTN_MIN && img.naturalWidth >= BTN_MIN;
+  }
+
+  function showPillFor(img) {
+    const p = ensurePill();
+    pillImg = img;
+    refreshPill();
+    const v = visibleRect(img);
+    if (v.r - v.l < BTN_MIN || v.b - v.t < 40) { hidePill(); return; }
+    p.el.style.display = 'flex';
+    p.el.style.left = Math.max(v.l, v.r - p.el.offsetWidth - 10) + 'px';
+    p.el.style.top = v.t + 10 + 'px';
+  }
+
+  function hidePill() {
+    clearTimeout(hideTimer);
+    hideTimer = null;
+    pillImg = null;
+    if (pill) pill.el.style.display = 'none';
+  }
+
+  // Tìm <img> đủ lớn nằm dưới con trỏ (kể cả khi bị lớp trong suốt của trang phủ lên)
+  function imgAt(x, y) {
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (el === pillHost) continue;
+      if (el instanceof HTMLImageElement) return eligible(el) ? el : null;
+    }
+    return null;
+  }
+
+  function onMove(force) {
+    if (force !== true) moveQueued = false;
+    if (!pillsEnabled || lastX < 0) return;
+    let img = imgAt(lastX, lastY);
+    if (img && overlayEntries.has(imgKey(img))) img = null; // ảnh đã dịch đã có nút cố định
+    if (img) {
+      clearTimeout(hideTimer);
+      hideTimer = null;
+      if (force === true || img !== pillImg) showPillFor(img);
+    } else if (pillImg && !hideTimer) {
+      hideTimer = setTimeout(hidePill, HIDE_DELAY);
+    }
+  }
+
+  document.addEventListener('mousemove', (e) => {
+    lastX = e.clientX;
+    lastY = e.clientY;
+    if (moveQueued) return;
+    moveQueued = true;
+    requestAnimationFrame(() => onMove());
+  }, { capture: true, passive: true });
+  document.addEventListener('mouseleave', () => { if (pillImg && !hideTimer) hideTimer = setTimeout(hidePill, HIDE_DELAY); });
+  // Nút không bám theo khi cuộn: ẩn đi, rê chuột lại sẽ hiện ở đúng chỗ mới
+  // Đang cuộn: nút ở yên trên ảnh dưới con trỏ, chỉ dời theo góc trên-phải phần ảnh đang thấy
+  // (ảnh khác trượt vào chỗ con trỏ thì nút chuyển sang ảnh đó)
+  let scrollQueued = false;
+  function onLayoutChange() {
+    if (scrollQueued) return;
+    scrollQueued = true;
+    requestAnimationFrame(() => { scrollQueued = false; onMove(true); });
+  }
+  window.addEventListener('scroll', onLayoutChange, true);
+  window.addEventListener('resize', onLayoutChange);
+
+  // Cho phép tắt nút: chrome.storage.sync { showImageButton: false }
+  try {
+    chrome.storage.sync.get({ showImageButton: true }).then((s) => { pillsEnabled = s.showImageButton !== false; });
+    chrome.storage.onChanged.addListener((ch) => {
+      if (ch.showImageButton) {
+        pillsEnabled = ch.showImageButton.newValue !== false;
+        if (!pillsEnabled) hidePill();
+        layoutAllOverlays();
+      }
+    });
+  } catch (_) {}
 
   function removePanel() {
     panel?.remove();
