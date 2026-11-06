@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Dịch ảnh bằng Gemini",
+  "version": "2.0.0",
+  "description": "Chọn vùng hoặc chuột phải vào ảnh để đọc và dịch chữ bằng Gemini.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Dịch ảnh bằng Gemini",
+    "default_popup": "popup.html"
+  },
+  "commands": {
+    "start-ocr": {
+      "suggested_key": {
+        "default": "Alt+Shift+T"
+      },
+      "description": "Chọn vùng chữ để dịch"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
