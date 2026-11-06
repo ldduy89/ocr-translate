@@ -214,23 +214,93 @@
   const overlayEntries = new Map();
   let layoutQueued = false;
 
+  // ---- Ảnh nằm trong div có cuộn riêng ----
+  // Lớp bản dịch được đặt NGAY TRONG div cuộn đó (toạ độ theo div), nên cuộn cùng nội dung
+  // và bị div cắt đúng như ảnh. Ảnh nằm thẳng trên trang thì vẫn gắn vào <body> như trước.
+  const hostPosition = new WeakMap(); // div cuộn -> giá trị position inline gốc (để khôi phục)
+
+  function isClipping(v) {
+    return v === 'auto' || v === 'scroll' || v === 'overlay' || v === 'hidden' || v === 'clip';
+  }
+
+  // Tìm div cuộn (hoặc cắt nội dung) gần nhất thực sự chứa ảnh tràn ra; null nếu ảnh nằm thẳng trên trang
+  function findScrollHost(img) {
+    const htmlClips = isClipping(getComputedStyle(document.documentElement).overflowY);
+    for (let el = img.parentElement; el && el !== document.documentElement; el = el.parentElement) {
+      if (el === document.body && !htmlClips) break; // body cuộn theo cửa sổ: xử lý như ảnh thường
+      const cs = getComputedStyle(el);
+      if (!isClipping(cs.overflowX) && !isClipping(cs.overflowY)) continue;
+      if (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1) return el;
+    }
+    return null;
+  }
+
+  // Lớp tuyệt đối chỉ cuộn theo div khi div là khối chứa; nếu div đang static thì tạm đặt relative
+  function ensurePositioned(host) {
+    if (getComputedStyle(host).position !== 'static') return;
+    if (!hostPosition.has(host)) hostPosition.set(host, host.style.position);
+    host.style.position = 'relative';
+  }
+
+  function releaseHost(host) {
+    if (!host || !hostPosition.has(host)) return;
+    for (const e of overlayEntries.values()) if (e.host === host) return; // còn ảnh khác dùng
+    host.style.position = hostPosition.get(host);
+    hostPosition.delete(host);
+  }
+
+  function removeEntry(entry) {
+    layoutObserver.unobserve(entry.img);
+    entry.layer.remove();
+    overlayEntries.delete(entry.srcUrl);
+    releaseHost(entry.host);
+  }
+
   function layoutOverlay(entry) {
     const { img, layer, width, height, items } = entry;
     if (!img.isConnected) {
-      layoutObserver.unobserve(img);
-      layer.remove();
-      overlayEntries.delete(entry.srcUrl);
+      removeEntry(entry);
       return;
     }
     const rect = img.getBoundingClientRect();
     const sx = rect.width / width;
     const sy = rect.height / height;
+
+    const host = findScrollHost(img);
+    if (host !== entry.host) {
+      const prev = entry.host;
+      entry.host = host;
+      if (host) layoutObserver.observe(host);
+      if (prev) releaseHost(prev);
+    }
+    const parent = host || document.body;
+    if (layer.parentNode !== parent) {
+      if (host) ensurePositioned(host);
+      parent.appendChild(layer); // cũng chạy lại khi trang dựng lại DOM và làm mất lớp
+      entry.sizeKey = '';
+    }
+
+    let left, top;
+    if (host) {
+      const hr = host.getBoundingClientRect();
+      left = rect.left - hr.left - host.clientLeft + host.scrollLeft;
+      top = rect.top - hr.top - host.clientTop + host.scrollTop;
+    } else {
+      left = rect.left + window.scrollX;
+      top = rect.top + window.scrollY;
+    }
     Object.assign(layer.style, {
-      left: rect.left + window.scrollX + 'px',
-      top: rect.top + window.scrollY + 'px',
+      display: rect.width < 1 || rect.height < 1 ? 'none' : 'block',
+      left: left + 'px',
+      top: top + 'px',
       width: rect.width + 'px',
       height: rect.height + 'px',
     });
+
+    // Chỉ dựng lại chữ khi kích thước ảnh đổi; chỉ cuộn hoặc dịch chỗ thì chỉ cần dời lớp
+    const sizeKey = rect.width.toFixed(1) + 'x' + rect.height.toFixed(1);
+    if (entry.sizeKey === sizeKey) return;
+    entry.sizeKey = sizeKey;
 
     layer.textContent = '';
     const pad = 2;
@@ -300,6 +370,22 @@
   const layoutObserver = new ResizeObserver(scheduleLayout);
   if (document.body) layoutObserver.observe(document.body);
   window.addEventListener('resize', scheduleLayout);
+  // Cuộn ở bất kỳ div nào (scroll không nổi bọt nên bắt ở giai đoạn capture)
+  window.addEventListener('scroll', scheduleLayout, true);
+
+  // Ảnh phía trên tải xong làm ảnh bên dưới dịch chỗ mà ảnh đó không đổi kích thước: kiểm tra định kỳ
+  let pollTimer = null;
+  function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(() => {
+      if (!overlayEntries.size) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        return;
+      }
+      scheduleLayout();
+    }, 400);
+  }
 
   function overlayImage({ srcUrl, width, height, items }) {
     const img = findImage(srcUrl);
@@ -309,10 +395,7 @@
     }
     // Chỉ thay bản dịch của đúng ảnh này, giữ bản dịch các ảnh khác
     const old = overlayEntries.get(srcUrl);
-    if (old) {
-      layoutObserver.unobserve(old.img);
-      old.layer.remove();
-    }
+    if (old) removeEntry(old);
     document.querySelectorAll('.ocr-img-overlay').forEach((n) => {
       if (n.dataset.src === srcUrl) n.remove();
     });
@@ -326,12 +409,13 @@
       zIndex: '2147483640',
       pointerEvents: 'none',
     });
-    document.body.appendChild(layer);
 
-    const entry = { srcUrl, img, layer, width, height, items };
+    // layoutOverlay tự gắn lớp vào đúng chỗ (body hoặc div cuộn chứa ảnh)
+    const entry = { srcUrl, img, layer, width, height, items, host: undefined, sizeKey: '' };
     overlayEntries.set(srcUrl, entry);
     layoutObserver.observe(img);
     layoutOverlay(entry);
+    startPolling();
   }
 
   // Chờ một ảnh tải xong, tối đa 4 giây
@@ -416,7 +500,13 @@
     return out;
   }
 
+  // Ảnh lazy trong div cuộn chưa tải vì chưa cuộn tới: ép tải ngay
+  function forceEagerImages() {
+    for (const i of document.images) if (i.loading === 'lazy') i.loading = 'eager';
+  }
+
   async function listPageImages() {
+    forceEagerImages();
     await Promise.all([...document.images].map(waitLoaded));
     return { images: collectImageUrls() };
   }
@@ -428,6 +518,7 @@
     if (Array.isArray(selected)) {
       urls = selected;
     } else {
+      forceEagerImages();
       await Promise.all([...document.images].map(waitLoaded));
       urls = collectImageUrls().map((x) => x.url);
     }
