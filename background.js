@@ -239,7 +239,7 @@ function avoidOverlap(items) {
 
 // Dựng một item từ khối Gemini. raw = khung chữ; bubble = khung bong bóng (mép ngoài) nếu có.
 // Có khung bong bóng thì dùng luôn, không đoán thêm; thiếu hoặc vô lý thì quay về cách cũ (nới theo màu nền).
-function buildItem(b, raw, bubble, data, W, H, clipY) {
+function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
   const y0lim = clipY ? clipY.y0 : 0;
   const y1lim = clipY ? clipY.y1 : H;
   const area = (r) => Math.max(1, (r.x1 - r.x0) * (r.y1 - r.y0));
@@ -260,6 +260,12 @@ function buildItem(b, raw, bubble, data, W, H, clipY) {
   }
   // Vùng chữ gần như trống (không có nét chữ nào): khối bị gán nhầm sang ảnh này -> bỏ
   const ink = inkBounds(data, W, raw, bg);
+  // Chế độ chặt (khối do vòng kiểm tra lại trả về, dễ bị model "bịa"): vùng chữ thật phải có nền khá đồng màu
+  // và có lượng nét chữ hợp lý; vùng tranh vẽ/nhiễu bị loại thay vì vẽ sub đè lên tranh.
+  if (strict && ink && (bg.frac < 0.35 || ink.count / ink.area < 0.015)) {
+    console.warn('[OCR] bỏ khối (vòng kiểm tra lại): vùng này không giống chữ trong bong bóng', { original: b.original, bgFrac: bg.frac, inkRatio: ink.count / ink.area });
+    return null;
+  }
   if (!ink || ink.count < Math.max(20, ink.area * 0.001)) {
     console.warn('[OCR] bỏ khối: không thấy nét chữ trong vùng text_box', { original: b.original, raw, bg, ink });
     return null;
@@ -279,7 +285,7 @@ function blockBoxes(b) {
   return { textNb, bubbleNb };
 }
 
-function itemsFromBlocks(blocks, bitmap) {
+function itemsFromBlocks(blocks, bitmap, strict) {
   const W = bitmap.width;
   const H = bitmap.height;
   const canvas = new OffscreenCanvas(W, H);
@@ -301,7 +307,7 @@ function itemsFromBlocks(blocks, bitmap) {
       console.warn('[OCR] bỏ khối: text_box nhỏ hơn 4px', { original: b.original, raw, W, H });
       continue;
     }
-    const it = buildItem(b, raw, bubbleNb ? toRect(bubbleNb) : null, data, W, H, null);
+    const it = buildItem(b, raw, bubbleNb ? toRect(bubbleNb) : null, data, W, H, null, strict);
     if (it) items.push(it);
   }
   avoidOverlap(items);
@@ -396,7 +402,7 @@ In "summary", write 3-8 words describing what THAT specific image shows (e.g. "w
 Many consecutive images may contain no text at all (just artwork or empty space): that is normal. Return an empty "blocks" array for them. NEVER move text from one image to another to fill a gap, and never shift blocks to the previous or next image. A block belongs only to the image where its text is actually printed, and its boxes are relative to that image.`;
 
   let ok = 0;
-  const RECHECK_HINT = 'These images were reported as having no text in a previous pass, but that is probably wrong. Look at each one again carefully: comic pages usually have speech bubbles, captions or sound effects. Only return an empty "blocks" array for an image that truly has no readable text.';
+  const RECHECK_HINT = 'Some of these images were reported as having no text in a previous pass. Check each one again. Return blocks only for text that is actually printed in THAT image, with exact boxes; do not guess or invent text. If an image truly has no readable text, return an empty "blocks" array for it.';
 
   // Gửi một nhóm ảnh trong một yêu cầu; trả về mảng blocks theo từng ảnh (null = thiếu)
   const askBatch = async (imgs, hint) => {
@@ -415,10 +421,11 @@ Many consecutive images may contain no text at all (just artwork or empty space)
   };
 
   // Dựng khung và vẽ bản dịch cho một ảnh
-  const showBlocks = async (img, blocks, canRecheck) => {
+  const showBlocks = async (img, blocks, canRecheck, round = 1) => {
     const bitmap = await createImageBitmap(img.blob);
     try {
-      let items = itemsFromBlocks(blocks, bitmap);
+      let items = itemsFromBlocks(blocks, bitmap, round > 1);
+      console.log(`[OCR] vòng ${round}: ${blocks.length} khối -> vẽ ${items.length}`, img.srcUrl);
       if (!items.length && blocks.length && canRecheck) {
         // Có khối nhưng vùng chữ đều trống trên ảnh này: nhiều khả năng bị gán nhầm ảnh -> hỏi lại riêng ảnh này
         try {
@@ -500,7 +507,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
             blocks = [];
           }
         }
-        if (blocks && blocks.length) await showBlocks(group[i], blocks, false);
+        if (blocks && blocks.length) await showBlocks(group[i], blocks, false, round);
         else if (!last) next.push(group[i]);
       }
     }
@@ -529,8 +536,10 @@ Many consecutive images may contain no text at all (just artwork or empty space)
 function dominantColor(data, W, x0, y0, x1, y1) {
   const hist = new Map();
   const step = 2;
+  let total = 0;
   for (let y = y0 + 1; y < y1 - 1; y += step) {
     for (let x = x0 + 1; x < x1 - 1; x += step) {
+      total++;
       const o = (y * W + x) * 4;
       const key = ((data[o] >> 3) << 10) | ((data[o + 1] >> 3) << 5) | (data[o + 2] >> 3);
       const e = hist.get(key);
@@ -542,7 +551,7 @@ function dominantColor(data, W, x0, y0, x1, y1) {
   for (const e of hist.values()) if (!best || e.n > best.n) best = e;
   if (!best) return { r: 255, g: 255, b: 255, dark: false };
   const r = Math.round(best.r / best.n), g = Math.round(best.g / best.n), b = Math.round(best.b / best.n);
-  return { r, g, b, dark: 0.299 * r + 0.587 * g + 0.114 * b < 128 };
+  return { r, g, b, dark: 0.299 * r + 0.587 * g + 0.114 * b < 128, frac: best.n / Math.max(1, total) };
 }
 
 // Mở rộng từng cạnh của khung ra ngoài khi dòng/cột kế bên vẫn là màu nền bong bóng,
