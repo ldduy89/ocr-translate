@@ -550,8 +550,9 @@
     const entry = { srcUrl, img, layer, width, height, items, host: undefined, sizeKey: '', hidden: false };
     overlayEntries.set(srcUrl, entry);
     layoutObserver.observe(img);
+    entry.flashUntil = Date.now() + 2500; // nháy ngay khi nút hiện, trong vòng 2,5 giây sau khi dịch xong
+    entry.flashed = false;
     layoutOverlay(entry);
-    flashPin(entry);
     removePendingPin(srcUrl); // nút cố định của bản dịch (updatePin trong layoutOverlay) thay vào ngay
     if (pillImg === img) hidePill(); // nút rê chuột nhường chỗ cho nút cố định
     startPolling();
@@ -741,7 +742,11 @@
     ico.appendChild(im);
     const label = document.createElement('span');
     el.append(ico, label);
-    el.addEventListener('animationend', (e) => { if (e.animationName === 'flash') el.classList.remove('flash'); });
+    // Hết hiệu ứng, hoặc bị huỷ vì nút bị ẩn (display:none khi ảnh cuộn ra khỏi màn hình) thì gỡ class,
+    // để lúc nút hiện lại không bị chạy lại từ đầu: hiệu ứng chỉ chạy đúng một lần lúc vừa dịch xong
+    for (const ev of ['animationend', 'animationcancel']) {
+      el.addEventListener(ev, (e) => { if (e.animationName === 'flash') el.classList.remove('flash'); });
+    }
     // Không cho sự kiện lọt xuống trang (tránh lật trang/zoom ảnh khi bấm nút)
     for (const t of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'dblclick', 'contextmenu']) {
       el.addEventListener(t, (e) => e.stopPropagation());
@@ -782,6 +787,12 @@
     pin.el.style.display = 'flex';
     pin.el.style.left = Math.max(v.l, v.r - pin.el.offsetWidth - 10) + 'px';
     pin.el.style.top = v.t + 10 + 'px';
+    // Vừa dịch xong và nút đang hiện: nháy đúng một lần. Lúc overlayImage chạy thì nút còn bị ẩn
+    // (pendingUrls chưa xoá), nên việc nháy được hoãn tới lần updatePin đầu tiên nút thực sự hiện.
+    if (entry.flashUntil && !entry.flashed) {
+      if (Date.now() <= entry.flashUntil) { entry.flashed = true; flashPin(entry); }
+      else entry.flashUntil = 0; // quá hạn (ảnh nằm ngoài màn hình lúc dịch xong): bỏ, không nháy khi cuộn tới
+    }
   }
 
   // Vừa dịch xong: nút nháy/nhún vài lần cho dễ thấy, rồi đứng yên
@@ -893,7 +904,11 @@
     pendingUrls.add(key);
     addPendingPin(key, img);
     hidePill(); // nút rê chuột nhường chỗ cho nút cố định đang xoay
-    const done = () => { pendingUrls.delete(key); removePendingPin(key); refreshPill(); };
+    const done = () => {
+      pendingUrls.delete(key); removePendingPin(key); refreshPill();
+      const e = overlayEntries.get(key);
+      if (e) updatePin(e); // hiện nút bản dịch (và nháy) ngay, khỏi chờ lần kiểm tra định kỳ
+    };
     try {
       chrome.runtime.sendMessage({ type: 'TRANSLATE_ONE', srcUrl: key }, () => {
         void chrome.runtime.lastError;
