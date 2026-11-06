@@ -270,6 +270,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
+// Trang báo ảnh thay đổi (div bị vẽ lại, thêm/xoá ảnh...) thì làm mới danh sách
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (msg && msg.type === 'IMAGES_CHANGED' && sender.tab && sender.tab.id === currentTabId) loadImages();
+});
+
 // Đổi tab thì tải lại danh sách của tab mới
 chrome.tabs.onActivated.addListener(() => loadImages());
 

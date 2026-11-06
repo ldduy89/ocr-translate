@@ -49,6 +49,47 @@
     }
   });
 
+  // ---------- Theo dõi thay đổi ảnh trên trang -> báo side panel làm mới danh sách ----------
+  const OWN_SELECTOR = '#ocr-pill-host, .ocr-img-overlay, #ocr-panel, #ocr-overlay';
+  function isOwnNode(n) {
+    const el = n && n.nodeType === 1 ? n : (n && n.parentElement);
+    return !!(el && el.closest && el.closest(OWN_SELECTOR));
+  }
+  function hasImg(n) {
+    return n.nodeType === 1 && (n.tagName === 'IMG' || !!n.querySelector('img'));
+  }
+  let imgChangeTimer = null;
+  function notifyImagesChanged() {
+    clearTimeout(imgChangeTimer);
+    imgChangeTimer = setTimeout(() => {
+      chrome.runtime.sendMessage({ type: 'IMAGES_CHANGED' }).catch(() => {});
+    }, 700); // gom nhiều thay đổi liên tiếp (div bị vẽ lại) thành 1 lần
+  }
+  function startImageWatch() {
+    if (!document.body) return;
+    new MutationObserver((records) => {
+      for (const m of records) {
+        if (isOwnNode(m.target)) continue; // bỏ qua thay đổi do extension tự tạo
+        if (m.type === 'attributes') {
+          if (m.target.tagName === 'IMG') { notifyImagesChanged(); return; }
+        } else if ([...m.addedNodes, ...m.removedNodes].some((n) => !isOwnNode(n) && hasImg(n))) {
+          notifyImagesChanged();
+          return;
+        }
+      }
+    }).observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['src', 'srcset', 'data-src'],
+    });
+    // Ảnh lazy gán src xong mới tải xong: báo thêm khi load
+    document.addEventListener('load', (e) => {
+      if (e.target && e.target.tagName === 'IMG' && !isOwnNode(e.target)) notifyImagesChanged();
+    }, true);
+  }
+  startImageWatch();
+
   function startSelection() {
     removePanel();
     cleanupSelection();
