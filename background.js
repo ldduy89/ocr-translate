@@ -120,8 +120,9 @@ For each block return:
 - "shape": "ellipse" only if the bubble is round, oval, cloud-like or spiky; "rect" for rectangular/square boxes and for text with no bubble.
 - "lines": the number of text lines of the ORIGINAL block as printed (count columns if the text is vertical).
 - "vertical": true if the original text runs top-to-bottom in columns, otherwise false.
+- "font_size": the em size of the original text (height of one character line) in the same 0-1000 units as the image height. For example, on an image 1000 px tall, text with 25 px characters is 25. Estimate from the glyph size, not the bubble.
 Only translate dialogue, narration and caption text. SKIP all sound effects and onomatopoeia (stylized or hand-lettered words for noises, ambient sounds, heartbeats, whispering, footsteps, impacts, laughter or crying sounds, etc., e.g. "ドキドキ", "ざわざわ", "BAM", "thump", "bisbis"), as well as isolated interjections or mimetic words that only describe the scene rather than being spoken or narrated. Do not return a block for them at all.
-Return ONLY JSON in this form: {"blocks":[{"original":"...","translated":"...","bubble_box":[0,0,0,0],"text_box":[0,0,0,0],"shape":"ellipse","lines":1,"vertical":false}]}`;
+Return ONLY JSON in this form: {"blocks":[{"original":"...","translated":"...","bubble_box":[0,0,0,0],"text_box":[0,0,0,0],"shape":"ellipse","lines":1,"font_size":30,"vertical":false}]}`;
 
   const body = JSON.stringify({
     contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: base64 } }] }],
@@ -181,6 +182,13 @@ function linePitch(b, raw) {
   const span = b.vertical ? raw.x1 - raw.x0 : raw.y1 - raw.y0;
   const pitch = span / n;
   return pitch >= 6 ? Math.round(pitch) : null;
+}
+
+// Đổi font_size của Gemini (thang 0-1000 theo chiều cao ảnh) sang px. Trả về null nếu vô lý.
+function fontPxFrom(b, H) {
+  const f = Number(b.font_size);
+  if (!Number.isFinite(f) || f < 5 || f > 400) return null;
+  return (f / 1000) * H;
 }
 
 // Khung sát nét chữ thật: bao các điểm ảnh khác hẳn màu nền trong khung Gemini.
@@ -266,7 +274,10 @@ function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
     console.warn('[OCR] bỏ khối (vòng kiểm tra lại): vùng này không giống chữ trong bong bóng (vòng cuối)', { original: b.original, bgFrac: bg.frac, inkRatio: ink.count / ink.area });
     return null;
   }
-  if (!ink || ink.count < Math.max(20, ink.area * 0.001)) {
+  // Chữ chỉ có dấu chấm/ba chấm (ví dụ "....") có rất ít nét nên không qua được kiểm tra nét.
+  // Với loại này vẫn giữ khối, dùng chính khung text_box để đo khoảng dòng.
+  const punctOnly = /^[\s.,…·!?~\-]+$/.test(String(b.original || ''));
+  if (!punctOnly && (!ink || ink.count < Math.max(20, ink.area * 0.001))) {
     console.warn('[OCR] bỏ khối: không thấy nét chữ trong vùng text_box', { original: b.original, raw, bg, ink });
     return null;
   }
@@ -274,7 +285,8 @@ function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
   return {
     box, conf: 100, original: b.original || '', translated: b.translated, bg, raw,
     fromBubble, shape: ellipse ? 'ellipse' : 'rect',
-    linePx: linePitch(b, ink),
+    linePx: linePitch(b, ink || box),
+    fontPx: fontPxFrom(b, H),
   };
 }
 
@@ -395,13 +407,19 @@ For each block return:
 - "shape": "ellipse" only if the bubble is round, oval, cloud-like or spiky; "rect" for rectangular/square boxes and for text with no bubble.
 - "lines": the number of text lines of the ORIGINAL block as printed (count columns if the text is vertical).
 - "vertical": true if the original text runs top-to-bottom in columns, otherwise false.
+- "font_size": the em size of the original text (height of one character line) in the same 0-1000 units as the image height. For example, on an image 1000 px tall, text with 25 px characters is 25. Estimate from the glyph size, not the bubble.
 Only translate dialogue, narration and caption text. SKIP all sound effects and onomatopoeia (stylized or hand-lettered words for noises, ambient sounds, heartbeats, whispering, footsteps, impacts, laughter or crying sounds, etc., e.g. "ドキドキ", "ざわざわ", "BAM", "thump", "bisbis"), as well as isolated interjections or mimetic words that only describe the scene rather than being spoken or narrated. Do not return a block for them at all. Never mix blocks between images.
-Return ONLY JSON in this form: {"images":[{"index":0,"summary":"...","blocks":[{"original":"...","translated":"...","bubble_box":[0,0,0,0],"text_box":[0,0,0,0],"shape":"ellipse","lines":1,"vertical":false}]}]}
+Return ONLY JSON in this form: {"images":[{"index":0,"summary":"...","blocks":[{"original":"...","translated":"...","bubble_box":[0,0,0,0],"text_box":[0,0,0,0],"shape":"ellipse","lines":1,"font_size":30,"vertical":false}]}]}
 Use the same index number as the "Image N" label. Return exactly one entry per label, in the same order, and never skip a label.
 In "summary", write 3-8 words describing what THAT specific image shows (e.g. "woman at a desk, no text"), BEFORE listing its blocks. This keeps every block attached to the right image.
 Many consecutive images may contain no text at all (just artwork or empty space): that is normal. Return an empty "blocks" array for them. NEVER move text from one image to another to fill a gap, and never shift blocks to the previous or next image. A block belongs only to the image where its text is actually printed, and its boxes are relative to that image.`;
 
   let ok = 0;
+  const undrawn = []; // ảnh có khối từ model nhưng không vẽ được
+  const drawn = new Set(); // URL ảnh đã vẽ được ít nhất một khối
+  const batchErrors = []; // ảnh thuộc lô vòng 1 bị lỗi yêu cầu
+  const tallErrors = []; // ảnh rất cao bị lỗi
+  const tallEmpty = []; // ảnh rất cao model không trả khối nào
   const RECHECK_HINT = 'Some of these images were reported as having no text in a previous pass. Check each one again. Return blocks only for text that is actually printed in THAT image, with exact boxes; do not guess or invent text. If an image truly has no readable text, return an empty "blocks" array for it.';
 
   // Gửi một nhóm ảnh trong một yêu cầu; trả về mảng blocks theo từng ảnh (null = thiếu)
@@ -429,6 +447,11 @@ Many consecutive images may contain no text at all (just artwork or empty space)
       if (items.length) {
         notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width: bitmap.width, height: bitmap.height, items });
         ok++;
+        drawn.add(img.srcUrl);
+      } else if (blocks.length) {
+        // Model có trả khối nhưng không khối nào vẽ được: ghi lại để xem trong log
+        undrawn.push({ url: img.srcUrl, blocks: blocks.length, round });
+        console.warn(`[OCR] ảnh không vẽ được khối nào (vòng ${round}, ${blocks.length} khối)`, img.srcUrl);
       }
     } finally {
       bitmap.close();
@@ -451,6 +474,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
       }
     } catch (err) {
       console.error('[OCR] lô Gemini lỗi', err);
+      batchErrors.push(...batch);
       notify(tabId, { type: 'SHOW_ERROR', error: err.message });
     }
   }
@@ -509,7 +533,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
   // Vòng 4: chỉ khi vòng 3 còn hơn 1 ảnh rỗng. Chạy xong thì dừng.
   if (emptyImgs.length > 1) {
     const work = [...emptyImgs, ...failedImgs];
-    await runRecheckRound(work, EXTRA_ROUND);
+    ({ empty: emptyImgs, failed: failedImgs } = await runRecheckRound(work, EXTRA_ROUND));
   }
 
   for (const img of loaded.filter((x) => x.tall)) {
@@ -518,13 +542,37 @@ Many consecutive images may contain no text at all (just artwork or empty space)
       if (items.length) {
         notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width, height, items });
         ok++;
+        drawn.add(img.srcUrl);
+      } else {
+        tallEmpty.push(img.srcUrl);
       }
     } catch (err) {
+      tallErrors.push(img.srcUrl);
       console.error('[OCR] ảnh rất cao lỗi', img.srcUrl, err);
       notify(tabId, { type: 'SHOW_ERROR', error: err.message });
     }
   }
 
+  // Tổng kết: mỗi ảnh nằm trong đúng một nhóm
+  const loadedUrls = new Set(loaded.map((x) => x.srcUrl));
+  const notDrawn = (arr) => [...new Set(arr.map((x) => (typeof x === 'string' ? x : x.srcUrl)))].filter((u) => !drawn.has(u));
+  const groups = [
+    ['có khối từ model nhưng không vẽ được', [...new Set(undrawn.map((u) => u.url))].filter((u) => !drawn.has(u))],
+    ['model trả rỗng sau khi thử hết các vòng', notDrawn(emptyImgs)],
+    ['lỗi yêu cầu, không thử lại được', notDrawn([...failedImgs, ...batchErrors])],
+    ['ảnh trống (bỏ qua)', notDrawn(loaded.filter((x) => x.blank))],
+    ['ảnh rất cao: model trả rỗng', notDrawn(tallEmpty)],
+    ['ảnh rất cao: lỗi', notDrawn(tallErrors)],
+    ['không tải được ảnh', list.filter((u) => !loadedUrls.has(u))],
+  ];
+  const sumGroups = groups.reduce((n, [, urls]) => n + urls.length, 0);
+  console.group(`[OCR] TỔNG KẾT: ${list.length} ảnh | đã vẽ ${drawn.size} | khác ${sumGroups}`);
+  for (const [label, urls] of groups) {
+    console.log(`${label}: ${urls.length}`);
+    for (const u of urls) console.log('   ' + u);
+  }
+  if (drawn.size + sumGroups !== list.length) console.warn('[OCR] còn ảnh chưa phân loại:', list.length - drawn.size - sumGroups);
+  console.groupEnd();
   notify(tabId, { type: 'SHOW_INFO', text: `Đã dịch ${ok}/${list.length} ảnh.` });
 }
 
@@ -728,8 +776,9 @@ For each block return:
 - "shape": "ellipse" only if the bubble is round, oval, cloud-like or spiky; "rect" for rectangular/square boxes and for text with no bubble.
 - "lines": the number of text lines of the ORIGINAL block as printed (count columns if the text is vertical).
 - "vertical": true if the original text runs top-to-bottom in columns, otherwise false.
+- "font_size": the em size of the original text (height of one character line) in the same 0-1000 units as the image height. For example, on an image 1000 px tall, text with 25 px characters is 25. Estimate from the glyph size, not the bubble.
 Only translate dialogue, narration and caption text. SKIP all sound effects and onomatopoeia (stylized or hand-lettered words for noises, ambient sounds, heartbeats, whispering, footsteps, impacts, laughter or crying sounds, etc., e.g. "ドキドキ", "ざわざわ", "BAM", "thump", "bisbis"), as well as isolated interjections or mimetic words that only describe the scene rather than being spoken or narrated. Do not return a block for them at all. Never mix blocks between pieces.
-Return ONLY JSON in this form: {"images":[{"index":0,"summary":"...","blocks":[{"original":"...","translated":"...","bubble_box":[0,0,0,0],"text_box":[0,0,0,0],"shape":"ellipse","lines":1,"vertical":false}]}]}
+Return ONLY JSON in this form: {"images":[{"index":0,"summary":"...","blocks":[{"original":"...","translated":"...","bubble_box":[0,0,0,0],"text_box":[0,0,0,0],"shape":"ellipse","lines":1,"font_size":30,"vertical":false}]}]}
 Use the same index number as the "Image N" label. Return exactly one entry per label, in the same order, and never skip a label.
 In "summary", write 3-8 words describing what THAT specific image shows (e.g. "woman at a desk, no text"), BEFORE listing its blocks. This keeps every block attached to the right image.
 Many consecutive images may contain no text at all (just artwork or empty space): that is normal. Return an empty "blocks" array for them. NEVER move text from one image to another to fill a gap, and never shift blocks to the previous or next image. A block belongs only to the image where its text is actually printed, and its boxes are relative to that image.`;

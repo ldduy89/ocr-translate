@@ -177,7 +177,7 @@
 
   // Hệ số cỡ chữ dịch so với bước dòng của chữ gốc (chỉnh nếu thấy chữ dịch to/nhỏ hơn chữ gốc)
   const FONT_CAP = 0.8;
-  const LINE_H = 1.2; // chừa chỗ cho dấu tiếng Việt, tránh bị cắt chân
+  const LINE_H = 1.0; // khoảng dòng; giữ đủ chỗ cho dấu tiếng Việt, tránh bị cắt
   const MIN_FONT = 24; // cỡ chữ nhỏ nhất của bản dịch (px)
 
   // maxSize: cỡ chữ tối đa theo chữ gốc trên hình (có thể không có)
@@ -274,7 +274,9 @@
         padding: `${my}px ${mx}px`,
       });
       layer.appendChild(div);
-      fitText(div, it.translated, tw, th, it.linePx ? it.linePx * sy * FONT_CAP : 0);
+      // Cỡ chữ gốc từ Gemini làm trần (không to hơn chữ gốc); không có thì dùng khoảng dòng đo được
+      const cap = it.fontPx ? it.fontPx * sy : it.linePx ? it.linePx * sy * FONT_CAP : 0;
+      fitText(div, it.translated, tw, th, cap);
     }
   }
 
