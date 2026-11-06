@@ -260,7 +260,10 @@ function buildItem(b, raw, bubble, data, W, H, clipY) {
   }
   // Vùng chữ gần như trống (không có nét chữ nào): khối bị gán nhầm sang ảnh này -> bỏ
   const ink = inkBounds(data, W, raw, bg);
-  if (!ink || ink.count < Math.max(20, ink.area * 0.001)) return null;
+  if (!ink || ink.count < Math.max(20, ink.area * 0.001)) {
+    console.warn('[OCR] bỏ khối: không thấy nét chữ trong vùng text_box', { original: b.original, raw, bg, ink });
+    return null;
+  }
   const ellipse = fromBubble && String(b.shape || '').toLowerCase() === 'ellipse';
   return {
     box, conf: 100, original: b.original || '', translated: b.translated, bg, raw,
@@ -289,9 +292,15 @@ function itemsFromBlocks(blocks, bitmap) {
   for (const b of blocks) {
     if (!b || !b.translated) continue;
     const { textNb, bubbleNb } = blockBoxes(b);
-    if (!textNb) continue;
+    if (!textNb) {
+      console.warn('[OCR] bỏ khối: thiếu/không đọc được text_box', b);
+      continue;
+    }
     const raw = toRect(textNb);
-    if (raw.x1 - raw.x0 < 4 || raw.y1 - raw.y0 < 4) continue;
+    if (raw.x1 - raw.x0 < 4 || raw.y1 - raw.y0 < 4) {
+      console.warn('[OCR] bỏ khối: text_box nhỏ hơn 4px', { original: b.original, raw, W, H });
+      continue;
+    }
     const it = buildItem(b, raw, bubbleNb ? toRect(bubbleNb) : null, data, W, H, null);
     if (it) items.push(it);
   }
@@ -323,8 +332,9 @@ function countReminder(n) {
   return `\n\nThis request contains exactly ${n} image${n === 1 ? '' : 's'}: labels "Image 0" to "Image ${n - 1}". The "images" array MUST have exactly ${n} entries, one for EVERY index from 0 to ${n - 1}. An image with no text at all (pure artwork, mostly black or empty, a cropped panel) STILL gets its own entry with an empty array, for example {"index":2,"summary":"pot on a table, no text","blocks":[]}. Never omit an entry because the image has nothing to translate.`;
 }
 
-const BATCH_MAX_IMAGES = 15;
+const BATCH_MAX_IMAGES = 8; // lô nhỏ: model lite hay trả "no text" hàng loạt khi lô lớn
 const BATCH_MAX_BYTES = 10 * 1024 * 1024;
+const MAX_ROUNDS = 3; // vòng 1: gửi theo lô; vòng 2-3: gom ảnh trả rỗng/thiếu gửi lại theo lô
 
 // Dịch tất cả ảnh: gửi nhiều ảnh trong một yêu cầu, chia lô khi quá nhiều hoặc quá nặng
 async function translateAllGemini(tabId, urls) {
@@ -386,55 +396,115 @@ In "summary", write 3-8 words describing what THAT specific image shows (e.g. "w
 Many consecutive images may contain no text at all (just artwork or empty space): that is normal. Return an empty "blocks" array for them. NEVER move text from one image to another to fill a gap, and never shift blocks to the previous or next image. A block belongs only to the image where its text is actually printed, and its boxes are relative to that image.`;
 
   let ok = 0;
+  const RECHECK_HINT = 'These images were reported as having no text in a previous pass, but that is probably wrong. Look at each one again carefully: comic pages usually have speech bubbles, captions or sound effects. Only return an empty "blocks" array for an image that truly has no readable text.';
+
+  // Gửi một nhóm ảnh trong một yêu cầu; trả về mảng blocks theo từng ảnh (null = thiếu)
+  const askBatch = async (imgs, hint) => {
+    const parts = [{ text: prompt + countReminder(imgs.length) + (hint ? '\n' + hint : '') }];
+    for (let i = 0; i < imgs.length; i++) {
+      const img = imgs[i];
+      parts.push({ text: `Image ${i}:` });
+      parts.push({ inline_data: { mime_type: img.mime, data: bytesToBase64(new Uint8Array(await img.blob.arrayBuffer())) } });
+    }
+    const body = JSON.stringify({
+      contents: [{ parts }],
+      generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+    });
+    const result = await geminiRotate(apiKey, body, parseJsonText);
+    return mapImageResults(result, imgs.length);
+  };
+
+  // Dựng khung và vẽ bản dịch cho một ảnh
+  const showBlocks = async (img, blocks, canRecheck) => {
+    const bitmap = await createImageBitmap(img.blob);
+    try {
+      let items = itemsFromBlocks(blocks, bitmap);
+      if (!items.length && blocks.length && canRecheck) {
+        // Có khối nhưng vùng chữ đều trống trên ảnh này: nhiều khả năng bị gán nhầm ảnh -> hỏi lại riêng ảnh này
+        try {
+          const b64 = bytesToBase64(new Uint8Array(await img.blob.arrayBuffer()));
+          items = itemsFromBlocks(await callGemini(apiKey, b64, img.mime, targetLang), bitmap);
+        } catch (err) {
+          console.warn('[Gemini] thử lại ảnh lẻ lỗi', img.srcUrl, err.message);
+        }
+      }
+      if (items.length) {
+        notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width: bitmap.width, height: bitmap.height, items });
+        ok++;
+      }
+    } finally {
+      bitmap.close();
+    }
+  };
+
+  // Vòng 1: gửi theo lô, vẽ ngay những ảnh đã có chữ. Ảnh trả rỗng/thiếu bị nghi
+  // (model lite hay gán "no text" nhầm) -> gom lại để hỏi tiếp ở vòng 2.
+  const suspects = [];
   for (const batch of batches) {
     try {
-      const parts = [{ text: prompt + countReminder(batch.length) }];
+      const perImage = await askBatch(batch);
       for (let i = 0; i < batch.length; i++) {
-        const img = batch[i];
-        parts.push({ text: `Image ${i}:` });
-        parts.push({ inline_data: { mime_type: img.mime, data: bytesToBase64(new Uint8Array(await img.blob.arrayBuffer())) } });
-      }
-      const body = JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0 },
-      });
-      const result = await geminiRotate(apiKey, body, parseJsonText);
-      const perImage = mapImageResults(result, batch.length);
-
-      for (let i = 0; i < batch.length; i++) {
-        const img = batch[i];
-        const bitmap = await createImageBitmap(img.blob);
-        let blocks = perImage[i];
-        if (blocks === null) {
-          // Lô không trả kết quả cho ảnh này: gửi lại riêng từng ảnh
-          try {
-            const b64 = bytesToBase64(new Uint8Array(await img.blob.arrayBuffer()));
-            blocks = await callGemini(apiKey, b64, img.mime, targetLang);
-          } catch (err) {
-            console.warn('[Gemini] thử lại ảnh lẻ lỗi', img.srcUrl, err.message);
-            blocks = [];
-          }
+        const blocks = perImage[i];
+        if (blocks === null || blocks.length === 0) {
+          suspects.push(batch[i]);
+          continue;
         }
-        let items = itemsFromBlocks(blocks, bitmap);
-        if (!items.length && blocks.length && perImage[i] !== null) {
-          // Có khối nhưng vùng chữ đều trống trên ảnh này: nhiều khả năng bị gán nhầm ảnh -> hỏi lại riêng ảnh này
-          try {
-            const b64 = bytesToBase64(new Uint8Array(await img.blob.arrayBuffer()));
-            items = itemsFromBlocks(await callGemini(apiKey, b64, img.mime, targetLang), bitmap);
-          } catch (err) {
-            console.warn('[Gemini] thử lại ảnh lẻ lỗi', img.srcUrl, err.message);
-          }
-        }
-        if (items.length) {
-          notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width: bitmap.width, height: bitmap.height, items });
-          ok++;
-        }
-        bitmap.close();
+        await showBlocks(batch[i], blocks, true);
       }
     } catch (err) {
       console.error('[OCR] lô Gemini lỗi', err);
       notify(tabId, { type: 'SHOW_ERROR', error: err.message });
     }
+  }
+
+  // Vòng 2..MAX_ROUNDS: gom mọi ảnh còn bị nghi từ tất cả các lô, gửi lại theo lô (ít yêu cầu nhất có thể).
+  // Ảnh có chữ thì vẽ và rời danh sách; ảnh vẫn rỗng/lỗi chuyển sang vòng sau. Hết vòng cuối mà vẫn rỗng thì coi là không có chữ.
+  let pending = suspects;
+  for (let round = 2; round <= MAX_ROUNDS && pending.length; round++) {
+    const last = round === MAX_ROUNDS;
+    const groups = [];
+    let cur = [], curBytes = 0;
+    for (const img of pending) {
+      if (cur.length && (cur.length >= BATCH_MAX_IMAGES || curBytes + img.blob.size > BATCH_MAX_BYTES)) {
+        groups.push(cur);
+        cur = [];
+        curBytes = 0;
+      }
+      cur.push(img);
+      curBytes += img.blob.size;
+    }
+    if (cur.length) groups.push(cur);
+
+    const next = [];
+    for (const group of groups) {
+      let perImage = null;
+      try {
+        perImage = await askBatch(group, RECHECK_HINT);
+      } catch (err) {
+        console.error(`[OCR] lô kiểm tra lại (vòng ${round}) lỗi`, err);
+        if (last) notify(tabId, { type: 'SHOW_ERROR', error: err.message });
+      }
+      if (!perImage) {
+        if (!last) next.push(...group); // lỗi mạng/quá tải: thử lại ở vòng sau
+        continue;
+      }
+      for (let i = 0; i < group.length; i++) {
+        let blocks = perImage[i];
+        if (blocks === null && last) {
+          // Vòng cuối mà lô vẫn không trả kết quả cho ảnh này: gửi riêng
+          try {
+            const b64 = bytesToBase64(new Uint8Array(await group[i].blob.arrayBuffer()));
+            blocks = await callGemini(apiKey, b64, group[i].mime, targetLang);
+          } catch (err) {
+            console.warn('[Gemini] thử lại ảnh lẻ lỗi', group[i].srcUrl, err.message);
+            blocks = [];
+          }
+        }
+        if (blocks && blocks.length) await showBlocks(group[i], blocks, false);
+        else if (!last) next.push(group[i]);
+      }
+    }
+    pending = next;
   }
 
   for (const img of loaded.filter((x) => x.tall)) {
@@ -602,9 +672,15 @@ function itemsFromTileBlocks(blocks, tile, W, fullCtx) {
   for (const b of blocks) {
     if (!b || !b.translated) continue;
     const { textNb, bubbleNb } = blockBoxes(b);
-    if (!textNb) continue;
+    if (!textNb) {
+      console.warn('[OCR] bỏ khối: thiếu/không đọc được text_box', b);
+      continue;
+    }
     const raw = toRect(textNb);
-    if (raw.x1 - raw.x0 < 4 || raw.y1 - raw.y0 < 4) continue;
+    if (raw.x1 - raw.x0 < 4 || raw.y1 - raw.y0 < 4) {
+      console.warn('[OCR] bỏ khối: text_box nhỏ hơn 4px', { original: b.original, raw, W, H });
+      continue;
+    }
     // Khung không được vượt ra khỏi đoạn đang xử lý (tránh lấy nhầm chữ của đoạn kề bên)
     const it = buildItem(b, raw, bubbleNb ? toRect(bubbleNb) : null, data, W, H, { y0: tile.y0, y1: tileBottom });
     if (it) items.push(it);

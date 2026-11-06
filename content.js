@@ -178,19 +178,25 @@
   // Hệ số cỡ chữ dịch so với bước dòng của chữ gốc (chỉnh nếu thấy chữ dịch to/nhỏ hơn chữ gốc)
   const FONT_CAP = 0.8;
   const LINE_H = 1.2; // chừa chỗ cho dấu tiếng Việt, tránh bị cắt chân
+  const MIN_FONT = 24; // cỡ chữ nhỏ nhất của bản dịch (px)
 
   // maxSize: cỡ chữ tối đa theo chữ gốc trên hình (có thể không có)
   function fitText(div, text, w, h, maxSize) {
     if (!measureCtx) measureCtx = document.createElement('canvas').getContext('2d');
-    let size = Math.max(8, Math.floor(h * 0.8));
-    if (maxSize) size = Math.max(8, Math.min(size, Math.floor(maxSize)));
+    let size = Math.max(MIN_FONT, Math.floor(h * 0.8));
+    if (maxSize) size = Math.max(MIN_FONT, Math.min(size, Math.floor(maxSize)));
     let lines = [];
-    for (; size >= 8; size--) {
+    for (; size >= MIN_FONT; size--) {
       measureCtx.font = `${size}px ${FONT_FAMILY}`;
       lines = wrapWords(text, w);
       const fitsHeight = lines.length * size * LINE_H <= h + 1;
       const fitsWidth = lines.every((l) => measureCtx.measureText(l).width <= w + 1);
       if (fitsHeight && fitsWidth) break;
+    }
+    if (size < MIN_FONT) {
+      size = MIN_FONT;
+      measureCtx.font = `${size}px ${FONT_FAMILY}`;
+      lines = wrapWords(text, w);
     }
     div.style.fontSize = size + 'px';
     div.style.lineHeight = String(LINE_H);
@@ -260,7 +266,7 @@
         alignItems: 'center',
         justifyContent: 'center',
         textAlign: 'center',
-        overflow: 'hidden',
+        overflow: 'visible', // cỡ chữ tối thiểu 24px: cho tràn khung thay vì cắt mất chữ
         lineHeight: String(LINE_H),
         fontFamily: FONT_FAMILY,
         boxSizing: 'border-box',
