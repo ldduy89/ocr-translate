@@ -1,3 +1,5 @@
+importScripts('account.js');
+
 // Mở cài đặt bằng Side Panel khi bấm icon trên thanh công cụ, thay cho popup
 chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true }).catch((err) => console.warn('[sidePanel]', err.message));
 
@@ -112,12 +114,10 @@ const TARGET_NAMES = {
   'la': 'Latin',
 };
 
-// Key mặc định; key nhập trong popup (nếu có) sẽ được ưu tiên
-
+// Gemini key lấy từ tài khoản (server cấp). Account.require() đã làm mới thông tin trước khi dịch.
 async function getGeminiKey() {
-  const { geminiKey } = await chrome.storage.local.get({ geminiKey: '' });
-  const key = geminiKey;
-  if (!key) throw new Error('Chưa nhập API key Gemini trong popup.');
+  const key = await Account.geminiKey();
+  if (!key) throw new Error('Chưa có key Gemini. Hãy đăng nhập trong side panel.');
   return key;
 }
 
@@ -458,7 +458,7 @@ async function loadImageBlob(tabId, srcUrl) {
 }
 
 // Dịch tất cả ảnh: gửi nhiều ảnh trong một yêu cầu, chia lô khi quá nhiều hoặc quá nặng
-async function translateAllGemini(tabId, urls) {
+async function translateAllGemini(tabId, urls, stats = { drawn: 0 }) {
   const { targetLang } = await getSettings();
   const target = TARGET_NAMES[targetLang] || targetLang;
   const apiKey = await getGeminiKey();
@@ -517,7 +517,10 @@ Many consecutive images may contain no text at all (just artwork or empty space)
 
   let ok = 0;
   // Cập nhật tiến độ lên panel trong trang mỗi khi vẽ xong một ảnh
-  const progress = () => notify(tabId, { type: 'SHOW_INFO', text: `Đang dịch: ${ok}/${list.length} ảnh...` });
+  const progress = () => {
+    stats.drawn = ok; // translateAll dùng số này để hoàn lượt cho ảnh không dịch được
+    notify(tabId, { type: 'SHOW_INFO', text: `Đang dịch: ${ok}/${list.length} ảnh...` });
+  };
   progress();
   const undrawn = []; // ảnh có khối từ model nhưng không vẽ được
   const drawn = new Set(); // URL ảnh đã vẽ được ít nhất một khối
@@ -965,10 +968,12 @@ async function geminiImageBlocks(tabId, srcUrl, targetLang) {
 
 // ---------- Dịch một ảnh (chuột phải) ----------
 async function runImageViewer(tabId, srcUrl, quiet = false) {
+  let ref = null; // mã lần trừ lượt, dùng để hoàn lượt khi dịch không thành
   try {
     if (!srcUrl) throw new Error('Không lấy được đường dẫn ảnh.');
     const { targetLang } = await getSettings();
     if (!quiet) notify(tabId, { type: 'SHOW_LOADING' });
+    ref = await Account.charge(1); // phải đăng nhập, có key và đủ lượt thì mới dịch
 
     const { items, width, height } = await geminiImageBlocks(tabId, srcUrl, targetLang);
     if (!items.length) {
@@ -982,6 +987,7 @@ async function runImageViewer(tabId, srcUrl, quiet = false) {
     return true;
   } catch (err) {
     console.error('[OCR]', srcUrl, err);
+    await Account.refund(ref, 1); // lỗi hoặc không có chữ: trả lại lượt
     notify(tabId, { type: 'SHOW_ERROR', error: err.message });
     return false;
   }
@@ -994,10 +1000,21 @@ async function translateAll(tabId, urls) {
     notify(tabId, { type: 'SHOW_ERROR', error: 'Không tìm thấy ảnh đủ lớn trên trang.' });
     return;
   }
+  // Trừ lượt theo số ảnh được chọn; ảnh không dịch được (lỗi, không có chữ) sẽ được hoàn lại ở cuối.
+  // Đặt trạng thái "đang chạy" trước để side panel luôn nhận được lúc kết thúc, kể cả khi trừ lượt thất bại.
   await setJob(tabId, 'running');
+  let ref = null;
+  const stats = { drawn: 0 };
   try {
-    await translateAllGemini(tabId, list);
+    try {
+      ref = await Account.charge(list.length);
+    } catch (err) {
+      notify(tabId, { type: 'SHOW_ERROR', error: err.message });
+      return;
+    }
+    await translateAllGemini(tabId, list, stats);
   } finally {
+    if (ref) await Account.refund(ref, list.length - stats.drawn);
     await setJob(tabId, 'idle');
   }
 }

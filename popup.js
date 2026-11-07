@@ -92,6 +92,7 @@ const modal = $('modal');
 let items = []; // { url, w, h, checked, done, notext }
 let currentTabId = null;
 let busy = false; // đang dịch ở tab hiện tại
+let account = null; // { token, user: { email, name, credits, gemini_key } } hoặc null nếu chưa đăng nhập
 
 function fill(sel, options, value) {
   sel.innerHTML = '';
@@ -109,14 +110,70 @@ function fill(sel, options, value) {
 
 // ---------- Cài đặt (modal) ----------
 chrome.storage.sync.get(DEFAULTS).then((s) => fill($('targetLang'), TARGET_OPTIONS, s.targetLang));
-chrome.storage.local.get({ geminiKey: '' }).then((k) => { $('geminiKey').value = k.geminiKey; });
 
 $('targetLang').onchange = () => chrome.storage.sync.set({ targetLang: $('targetLang').value });
-$('geminiKey').onchange = () => chrome.storage.local.set({ geminiKey: $('geminiKey').value.trim() });
 
 $('settings').onclick = () => modal.classList.add('show');
 $('closeSettings').onclick = () => modal.classList.remove('show');
 modal.onclick = (e) => { if (e.target === modal) modal.classList.remove('show'); };
+
+// ---------- Tài khoản ----------
+function showAcctMsg(text) {
+  $('acctMsg').textContent = text || '';
+}
+
+function renderAccount() {
+  const u = account && account.user;
+  $('creditsChip').textContent = u ? `${u.credits} lượt` : 'Đăng nhập';
+  $('creditsChip').title = u ? `${u.email}: còn ${u.credits} lượt dịch` : 'Đăng nhập Google để dịch';
+  $('acctEmail').textContent = u ? u.email : 'Chưa đăng nhập';
+  $('acctCredits').textContent = u ? String(u.credits) : '–';
+  $('loginBtn').style.display = u ? 'none' : '';
+  $('logoutBtn').style.display = u ? '' : 'none';
+  updateFooter();
+}
+
+let loggingIn = false;
+async function doLogin() {
+  if (loggingIn) return;
+  loggingIn = true;
+  showAcctMsg('');
+  $('loginBtn').disabled = true;
+  try {
+    account = await Account.login(true);
+  } catch (err) {
+    showAcctMsg(err.message);
+    modal.classList.add('show'); // cho người dùng thấy lý do lỗi
+  } finally {
+    loggingIn = false;
+    $('loginBtn').disabled = false;
+    renderAccount();
+  }
+}
+
+$('loginBtn').onclick = doLogin;
+$('creditsChip').onclick = () => (account ? modal.classList.add('show') : doLogin());
+$('logoutBtn').onclick = async () => {
+  await Account.logout();
+  account = null;
+  showAcctMsg('');
+  renderAccount();
+};
+
+// Tài khoản đổi (trừ/hoàn lượt ở background, đăng nhập ở nơi khác...) thì cập nhật ngay
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.account) {
+    account = changes.account.newValue || null;
+    renderAccount();
+  }
+});
+
+async function loadAccount() {
+  account = await Account.load();
+  renderAccount();
+  // Làm mới lượt còn lại và key từ server
+  Account.refresh().then((a) => { account = a; renderAccount(); }).catch(() => {});
+}
 
 // ---------- Trạng thái lưu ở background ----------
 async function activeTab() {
@@ -232,6 +289,12 @@ function updateFooter() {
   translateBtn.disabled = busy || selected === 0;
   if (busy) translateBtn.textContent = 'Đang dịch...';
   else translateBtn.textContent = selected ? `Dịch ${selected} ảnh đã chọn` : 'Chưa chọn ảnh nào';
+
+  // Chưa đăng nhập: nút này thành nút đăng nhập
+  if (!account && !busy) {
+    translateBtn.disabled = false;
+    translateBtn.textContent = 'Đăng nhập Google để dịch';
+  }
 }
 
 selectAllCb.onchange = () => setAll(selectAllCb.checked);
@@ -239,6 +302,7 @@ $('refresh').onclick = () => loadImages();
 
 translateBtn.onclick = async () => {
   if (busy) return;
+  if (!account) { doLogin(); return; }
   const urls = items.filter((x) => x.checked && !x.done && !x.notext).map((x) => x.url);
   if (!urls.length) return;
   const tab = await activeTab();
@@ -290,4 +354,5 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'complete' && tabId === currentTabId) loadImages(true);
 });
 
+loadAccount();
 loadImages();

@@ -6,7 +6,8 @@
   "permissions": [
     "storage",
     "contextMenus",
-    "sidePanel"
+    "sidePanel",
+    "identity"
   ],
   "host_permissions": [
     "<all_urls>",
@@ -59,5 +60,13 @@
         "<all_urls>"
       ]
     }
-  ]
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAp9H9uDNOjlUo4hD9h6ovcPX2Z9w64kVWWZfaCb+fc80ksah9yjX1ta1Y9mC79Ev1dVJiolkoKfN2SHLig8eETKZcg5HUBlr+v2YAzKJfeuaG142IYTXi47MRADNe1OYgad7ABrffqEO6IuPLhz9pcpwl4INGSosSHhbxAYzksfj8S0tAEbthYNoqHX15dSgTmnVKjB8i/OGscXc4yz9tlRrPvMDp66Hq5aKWlmZkpVzYdk3joNUZXKR5SgAe91w1JkJFDQQAXhrVuK3cIVmOSrUJaU22IHlei7UeidgQ1/KXS/MRCUVqcH5d0aA4p4+Hs6Y/BtfBxPvsdyOydY/OIQIDAQAB",
+  "oauth2": {
+    "client_id": "566995321513-07cpp9a2gv8m2lmat8mc0vmm3br4aluk.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile"
+    ]
+  }
 }

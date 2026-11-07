@@ -43,7 +43,14 @@
     .dialog h2 { font-size: 14px; margin: 0 0 8px; }
     label.lbl { display: block; font-size: 12px; color: #9aa3b2; margin: 10px 0 4px; }
     select, input[type=password] { width: 100%; padding: 7px; font: inherit; background: #1e2228; color: #dcdfe4; border: 1px solid #3a3f4b; border-radius: 6px; box-sizing: border-box; }
-    .row { display: flex; justify-content: flex-end; margin-top: 14px; }
+    .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+    .chip { background: #2c313a; color: #dcdfe4; border: 1px solid #454c5a; border-radius: 999px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
+    .chip:hover { background: #353b46; }
+    .acct { border: 1px solid #3a3f4b; border-radius: 8px; padding: 10px; background: #252a32; font-size: 13px; }
+    .acct .line { display: flex; justify-content: space-between; gap: 8px; margin: 2px 0; }
+    .acct .k { color: #9aa3b2; }
+    .acct .v { text-align: right; word-break: break-all; }
+    #acctMsg { color: #e06c75; font-size: 12px; margin-top: 8px; min-height: 0; }
     html { color-scheme: dark; }
     button, select, input { outline: none; }
     button:focus-visible, select:focus-visible, input:focus-visible { outline: 1px solid #5b6375; outline-offset: 1px; }
@@ -66,6 +73,7 @@
     <div class="bar">
       <label class="selall"><input type="checkbox" id="selectAllCb"> Chọn hết</label>
       <span class="grow"></span>
+      <button class="chip" id="creditsChip" title="Tài khoản">Đăng nhập</button>
       <span class="count" id="count"></span>
       <button class="btn icon" id="refresh" title="Làm mới danh sách ảnh">⟳</button>
       <button class="btn icon" id="settings" title="Cài đặt">⚙</button>
@@ -79,12 +87,21 @@
       <h2>Cài đặt</h2>
       <label class="lbl" for="targetLang">Dịch sang</label>
       <select id="targetLang"></select>
-      <label class="lbl" for="geminiKey">Gemini API key</label>
-      <input type="password" id="geminiKey" placeholder="AIza...">
-      <div class="row"><button class="btn primary" id="closeSettings">Xong</button></div>
+      <label class="lbl">Tài khoản</label>
+      <div class="acct">
+        <div class="line"><span class="k">Email</span><span class="v" id="acctEmail">Chưa đăng nhập</span></div>
+        <div class="line"><span class="k">Lượt dịch còn lại</span><span class="v" id="acctCredits">–</span></div>
+      </div>
+      <div id="acctMsg"></div>
+      <div class="row">
+        <button class="btn" id="loginBtn">Đăng nhập Google</button>
+        <button class="btn" id="logoutBtn" style="display:none">Đăng xuất</button>
+        <button class="btn primary" id="closeSettings">Xong</button>
+      </div>
     </div>
   </div>
 
+  <script src="account.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
