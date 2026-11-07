@@ -361,9 +361,9 @@
       const w = ellipse ? bw * (1 - 2 * inset) : bw + 2 * pad;
       const h = ellipse ? bh * (1 - 2 * inset) : bh + 2 * pad;
       if (w < 6 || h < 6) continue;
-      // Vùng chữ: elip chỉ dùng phần chữ nhật nằm trong elip (~70%); khung chữ nhật chừa lề đều 7%
+      // Vùng chữ: elip chỉ dùng phần chữ nhật nằm gọn trong elip (~73%); khung chữ nhật chừa lề đều 7%
       // (tối thiểu 6px) để chữ không sát hoặc bị cắt ở mép
-      const k = ellipse ? 0.78 : 1;
+      const k = ellipse ? 0.73 : 1; // 0,78 cũ làm chữ chạm mép; 0,73 là mức vừa phải
       const mx = ellipse ? (w - w * k) / 2 : Math.max(6, Math.min(w, h) * 0.07);
       const my = ellipse ? (h - h * k) / 2 : Math.max(6, Math.min(w, h) * 0.07);
       const tw = w - 2 * mx;

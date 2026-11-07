@@ -143,9 +143,13 @@ function applyStates(store) {
   }
 }
 
-async function loadImages() {
-  listEl.innerHTML = '<div class="empty">Đang tìm ảnh...</div>';
+// resetScroll: true khi đổi tab hoặc trang tải lại (danh sách khác hẳn nên về đầu);
+// còn lại (nội dung trang đổi, bấm làm mới) thì giữ nguyên vị trí cuộn của danh sách
+async function loadImages(resetScroll = false) {
+  // Chỉ hiện "Đang tìm ảnh..." lần đầu; đã có danh sách thì giữ nguyên để không bị nhảy lên đầu
+  if (!items.length || resetScroll) listEl.innerHTML = '<div class="empty">Đang tìm ảnh...</div>';
   const tab = await activeTab();
+  const tabChanged = tab?.id !== currentTabId;
   currentTabId = tab?.id ?? null;
   let res = null;
   if (currentTabId) res = await chrome.tabs.sendMessage(currentTabId, { type: 'LIST_IMAGES' }).catch(() => null);
@@ -155,10 +159,12 @@ async function loadImages() {
   applyStates(store);
   busy = !!(store.job && store.job.tabId === currentTabId && store.job.status === 'running');
   render();
+  if (resetScroll || tabChanged) listEl.scrollTop = 0;
 }
 
 // ---------- Hiển thị ----------
 function render() {
+  const scrollTop = listEl.scrollTop; // dựng lại danh sách sẽ làm mất vị trí cuộn, nên nhớ lại rồi trả về
   listEl.innerHTML = '';
   if (!items.length) {
     listEl.innerHTML = '<div class="empty">Không tìm thấy ảnh nào trên trang này.</div>';
@@ -204,6 +210,7 @@ function render() {
     card.append(cb, img, dim, badge);
     listEl.appendChild(card);
   }
+  listEl.scrollTop = scrollTop;
   updateFooter();
 }
 
@@ -276,11 +283,11 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
 });
 
 // Đổi tab thì tải lại danh sách của tab mới
-chrome.tabs.onActivated.addListener(() => loadImages());
+chrome.tabs.onActivated.addListener(() => loadImages(true));
 
 // Trang của tab đang xem tải xong thì tự làm mới danh sách
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === 'complete' && tabId === currentTabId) loadImages();
+  if (changeInfo.status === 'complete' && tabId === currentTabId) loadImages(true);
 });
 
 loadImages();

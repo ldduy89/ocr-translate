@@ -757,11 +757,11 @@ function analyzeBox(data, W, H, box) {
   return { box: snapped, bg };
 }
 
-// ---------- Ảnh cao (> 6000px): cắt đôi, mỗi đoạn không quá 5000px ----------
+// ---------- Ảnh cao (> 6000px): chia đoạn đều nhau, mỗi đoạn không quá 6000px ----------
 // Bật/tắt việc cắt ảnh cao (ảnh > TALL_LIMIT được cắt thành đoạn)
 const SPLIT_TALL_IMAGES = true;
 const TALL_LIMIT = 6000; // ảnh cao hơn mức này mới bị cắt
-const TILE_MAX = 5000;   // mỗi đoạn tối đa 5000px
+const TILE_MAX = 6000;   // mỗi đoạn tối đa 6000px; cứ thêm mỗi 6000px thì thêm một đoạn
 const CUT_SEARCH = 600;  // tìm dòng cắt trong khoảng +-600px quanh điểm giữa
 
 // Tìm dòng cắt an toàn trong [lo, hi], ưu tiên gần `target`: khoảng trống đồng màu giữa các khung,
@@ -817,8 +817,8 @@ async function imageTiles(blob, mime) {
   }
 
   const img = fullCtx.getImageData(0, 0, W, H).data;
-  // Chia đều: ít nhất 2 đoạn, đủ nhiều để mỗi đoạn <= TILE_MAX
-  const n = Math.max(2, Math.ceil(H / TILE_MAX));
+  // Số đoạn: >6000 chia 2, từ 12000 chia 3, từ 18000 chia 4... (mỗi đoạn luôn <= TILE_MAX)
+  const n = Math.floor(H / TILE_MAX) + 1;
   const cuts = [0];
   for (let i = 1; i < n; i++) {
     const prev = cuts[cuts.length - 1];
