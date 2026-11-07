@@ -5,7 +5,7 @@
 const SERVER_URL = 'http://localhost:3000';
 
 const Account = (() => {
-  const KEY = 'account'; // chrome.storage.local: { token, user: { email, name, credits, gemini_key } }
+  const KEY = 'account'; // chrome.storage.local: { token, user: { email, name, credits, credits_free, credits_paid, gemini_key } }
 
   async function load() {
     return (await chrome.storage.local.get({ [KEY]: null }))[KEY];
@@ -45,10 +45,13 @@ const Account = (() => {
     return typeof r === 'string' ? r : r && r.token;
   }
 
-  async function patchCredits(n) {
+  // Cập nhật số lượt từ phản hồi của server: { credits, credits_free, credits_paid }
+  async function patchCredits(data) {
     const acc = await load();
-    if (acc && Number.isFinite(n)) {
-      acc.user.credits = n;
+    if (acc && data && Number.isFinite(data.credits)) {
+      acc.user.credits = data.credits;
+      if (Number.isFinite(data.credits_free)) acc.user.credits_free = data.credits_free;
+      if (Number.isFinite(data.credits_paid)) acc.user.credits_paid = data.credits_paid;
       await save(acc);
     }
   }
@@ -109,11 +112,11 @@ const Account = (() => {
     const ref = crypto.randomUUID();
     const { status, data } = await api('/usage', { method: 'POST', token: acc.token, body: { count, ref } });
     if (status === 402) {
-      await patchCredits(data.credits);
+      await patchCredits(data);
       throw new Error(`Không đủ lượt dịch: cần ${count}, còn ${data.credits}.`);
     }
     if (status !== 200) throw new Error(`Không trừ được lượt dịch (${status}).`);
-    await patchCredits(data.credits);
+    await patchCredits(data);
     return ref;
   }
 
@@ -124,7 +127,7 @@ const Account = (() => {
       const acc = await load();
       if (!acc) return;
       const { status, data } = await api('/usage/refund', { method: 'POST', token: acc.token, body: { ref, count } });
-      if (status === 200) await patchCredits(data.credits);
+      if (status === 200) await patchCredits(data);
     } catch { /* bỏ qua */ }
   }
 

@@ -87,12 +87,13 @@ const listEl = $('list');
 const countEl = $('count');
 const translateBtn = $('translate');
 const selectAllCb = $('selectAllCb');
-const modal = $('modal');
+const modal = $('modal');         // cài đặt
+const userModal = $('userModal'); // tài khoản
 
 let items = []; // { url, w, h, checked, done, notext }
 let currentTabId = null;
 let busy = false; // đang dịch ở tab hiện tại
-let account = null; // { token, user: { email, name, credits, gemini_key } } hoặc null nếu chưa đăng nhập
+let account = null; // { token, user: { email, name, credits, credits_free, credits_paid, gemini_key } } hoặc null nếu chưa đăng nhập
 
 function fill(sel, options, value) {
   sel.innerHTML = '';
@@ -117,6 +118,16 @@ $('settings').onclick = () => modal.classList.add('show');
 $('closeSettings').onclick = () => modal.classList.remove('show');
 modal.onclick = (e) => { if (e.target === modal) modal.classList.remove('show'); };
 
+// ---------- Tài khoản (modal riêng) ----------
+$('userBtn').onclick = () => userModal.classList.add('show');
+$('closeUser').onclick = () => userModal.classList.remove('show');
+userModal.onclick = (e) => { if (e.target === userModal) userModal.classList.remove('show'); };
+
+// Nhấn Esc để đóng popup đang mở
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { modal.classList.remove('show'); userModal.classList.remove('show'); }
+});
+
 // ---------- Tài khoản ----------
 function showAcctMsg(text) {
   $('acctMsg').textContent = text || '';
@@ -124,9 +135,10 @@ function showAcctMsg(text) {
 
 function renderAccount() {
   const u = account && account.user;
-  $('creditsChip').textContent = u ? `${u.credits} lượt` : 'Đăng nhập';
-  $('creditsChip').title = u ? `${u.email}: còn ${u.credits} lượt dịch` : 'Đăng nhập Google để dịch';
+  $('userBtn').title = u ? `${u.email}: còn ${u.credits} lượt dịch (miễn phí ${u.credits_free ?? 0}, đã mua ${u.credits_paid ?? 0})` : 'Đăng nhập Google';
   $('acctEmail').textContent = u ? u.email : 'Chưa đăng nhập';
+  $('acctFree').textContent = u ? String(u.credits_free ?? 0) : '–';
+  $('acctPaid').textContent = u ? String(u.credits_paid ?? 0) : '–';
   $('acctCredits').textContent = u ? String(u.credits) : '–';
   $('loginBtn').style.display = u ? 'none' : '';
   $('logoutBtn').style.display = u ? '' : 'none';
@@ -143,7 +155,7 @@ async function doLogin() {
     account = await Account.login(true);
   } catch (err) {
     showAcctMsg(err.message);
-    modal.classList.add('show'); // cho người dùng thấy lý do lỗi
+    userModal.classList.add('show'); // cho người dùng thấy lý do lỗi
   } finally {
     loggingIn = false;
     $('loginBtn').disabled = false;
@@ -152,7 +164,6 @@ async function doLogin() {
 }
 
 $('loginBtn').onclick = doLogin;
-$('creditsChip').onclick = () => (account ? modal.classList.add('show') : doLogin());
 $('logoutBtn').onclick = async () => {
   await Account.logout();
   account = null;
