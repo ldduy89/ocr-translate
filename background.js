@@ -375,7 +375,8 @@ function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
     box, conf: 100, original: b.original || '', translated: b.translated, bg, raw,
     fromBubble, shape: ellipse ? 'ellipse' : 'rect',
     linePx: linePitch(b, ink || box),
-    fontPx: fontPxFrom(b, H),
+    // font_size của Gemini tính theo chiều cao của đoạn ảnh đang gửi (khi cắt ảnh dài là đoạn, không phải cả ảnh)
+    fontPx: fontPxFrom(b, clipY ? clipY.y1 - clipY.y0 : H),
   };
 }
 
@@ -778,8 +779,8 @@ function analyzeBox(data, W, H, box) {
 // ---------- Ảnh cao (> 6000px): chia đoạn đều nhau, mỗi đoạn không quá 6000px ----------
 // Bật/tắt việc cắt ảnh cao (ảnh > TALL_LIMIT được cắt thành đoạn)
 const SPLIT_TALL_IMAGES = true;
-const TALL_LIMIT = 6000; // ảnh cao hơn mức này mới bị cắt
-const TILE_MAX = 6000;   // mỗi đoạn tối đa 6000px; cứ thêm mỗi 6000px thì thêm một đoạn
+const TALL_LIMIT = 4000; // ảnh cao hơn mức này mới bị cắt
+const TILE_MAX = 4000;   // mỗi đoạn tối đa 4000px; cứ thêm mỗi 4000px thì thêm một đoạn
 const CUT_SEARCH = 600;  // tìm dòng cắt trong khoảng +-600px quanh điểm giữa
 
 // Tìm dòng cắt an toàn trong [lo, hi], ưu tiên gần `target`: khoảng trống đồng màu giữa các khung,
@@ -835,7 +836,7 @@ async function imageTiles(blob, mime) {
   }
 
   const img = fullCtx.getImageData(0, 0, W, H).data;
-  // Số đoạn: >6000 chia 2, từ 12000 chia 3, từ 18000 chia 4... (mỗi đoạn luôn <= TILE_MAX)
+  // Số đoạn: cứ mỗi TILE_MAX px thì thêm một đoạn (mỗi đoạn luôn <= TILE_MAX)
   const n = Math.floor(H / TILE_MAX) + 1;
   const cuts = [0];
   for (let i = 1; i < n; i++) {
@@ -909,9 +910,11 @@ function dedupeItems(items) {
 }
 
 // Gửi nhiều đoạn của cùng một ảnh trong một yêu cầu, mỗi đoạn có nhãn thứ tự
-async function callGeminiPieces(apiKey, pieces, targetLang) {
+// Gửi nhiều đoạn của MỘT ảnh trong một yêu cầu. Nhãn đoạn: "Image <ảnh>_<đoạn>" (vd "Image 0_0", "Image 0_1").
+// Trả về mảng blocks theo thứ tự đoạn; đoạn nào model không trả về thì là null (để gửi lại riêng).
+async function callGeminiPieces(apiKey, pieces, targetLang, imageNo = 0) {
   const target = TARGET_NAMES[targetLang] || targetLang;
-  const prompt = `You are given several consecutive vertical pieces of ONE tall comic/manga page, labeled "Image 0", "Image 1", ... from top to bottom. The pieces are cut at blank gutters between panels, so no text block is split across two pieces.
+  const prompt = `You are given several consecutive vertical pieces of ONE tall comic/manga page, labeled "Image ${imageNo}_0", "Image ${imageNo}_1", ... from top to bottom (the number after _ is the piece order). The pieces are cut at blank gutters between panels, so no text block is split across two pieces.
 For each piece, find every block of readable text in THAT piece. Merge lines that belong to the same sentence or bubble into one block.
 For each block return:
 - "original": the exact text as written, in its original language, with line breaks replaced by spaces.
@@ -927,14 +930,15 @@ For each block return:
 - "vertical": true if the original text runs top-to-bottom in columns, otherwise false.
 - "font_size": the em size of the original text (height of one character line) in the same 0-1000 units as the image height. For example, on an image 1000 px tall, text with 25 px characters is 25. Estimate from the glyph size, not the bubble.
 Only translate dialogue, narration and caption text. SKIP all sound effects and onomatopoeia (stylized or hand-lettered words for noises, ambient sounds, heartbeats, whispering, footsteps, impacts, laughter or crying sounds, etc., e.g. "ドキドキ", "ざわざわ", "BAM", "thump", "bisbis"), as well as isolated interjections or mimetic words that only describe the scene rather than being spoken or narrated. Do not return a block for them at all. Never mix blocks between pieces.
-Return ONLY JSON in this form: {"images":[{"index":0,"summary":"...","blocks":[{"original":"...","translated":"...","bubble_box":[0,0,0,0],"text_box":[0,0,0,0],"shape":"ellipse","lines":1,"font_size":30,"vertical":false}]}]}
-Use the same index number as the "Image N" label. Return exactly one entry per label, in the same order, and never skip a label.
-In "summary", write 3-8 words describing what THAT specific image shows (e.g. "woman at a desk, no text"), BEFORE listing its blocks. This keeps every block attached to the right image.
+Return ONLY JSON in this form: {"images":[{"index":"${imageNo}_0","summary":"...","blocks":[{"original":"...","translated":"...","bubble_box":[0,0,0,0],"text_box":[0,0,0,0],"shape":"ellipse","lines":1,"font_size":30,"vertical":false}]}]}
+Use the same index string as the piece label ("${imageNo}_0", "${imageNo}_1", ...). Return exactly one entry per label, in the same order, and never skip a label.
+In "summary", write 3-8 words describing what THAT specific piece shows (e.g. "woman at a desk, no text"), BEFORE listing its blocks. This keeps every block attached to the right image.
 Many consecutive images may contain no text at all (just artwork or empty space): that is normal. Return an empty "blocks" array for them. NEVER move text from one image to another to fill a gap, and never shift blocks to the previous or next image. A block belongs only to the image where its text is actually printed, and its boxes are relative to that image.`;
 
-  const parts = [{ text: prompt + countReminder(pieces.length) }];
+  const reminder = `\n\nThis request contains exactly ${pieces.length} pieces of one image, labeled "Image ${imageNo}_0" to "Image ${imageNo}_${pieces.length - 1}". The "images" array MUST have exactly ${pieces.length} entries, one for EVERY index from "${imageNo}_0" to "${imageNo}_${pieces.length - 1}". A piece with no text STILL gets its own entry with an empty array. Never omit an entry.`;
+  const parts = [{ text: prompt + reminder }];
   pieces.forEach((p, i) => {
-    parts.push({ text: `Image ${i}:` });
+    parts.push({ text: `Image ${imageNo}_${i}:` });
     parts.push({ inline_data: { mime_type: p.mime, data: p.base64 } });
   });
   const body = JSON.stringify({
@@ -942,7 +946,13 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     generationConfig: { responseMimeType: 'application/json', temperature: 0 },
   });
   const result = await geminiRotate(apiKey, body, parseJsonText);
-  return mapImageResults(result, pieces.length);
+  // Ghép theo nhãn "imageNo_i"; nhãn thiếu thì null
+  const list = Array.isArray(result.images) ? result.images : [];
+  const byLabel = new Map();
+  for (const e of list) {
+    if (e && e.index !== undefined) byLabel.set(String(e.index).trim(), e.blocks || []);
+  }
+  return pieces.map((_, i) => (byLabel.has(`${imageNo}_${i}`) ? byLabel.get(`${imageNo}_${i}`) : null));
 }
 
 // Một ảnh (có thể gồm nhiều đoạn) -> items để phủ lên trang
@@ -955,11 +965,19 @@ async function geminiImageItems(blob, mime, apiKey, targetLang) {
     const blocks = await callGemini(apiKey, base64, tiles[0].mime, targetLang);
     all = itemsFromTileBlocks(blocks, tiles[0], W, fullCtx);
   } else {
+    // Gộp các đoạn của ảnh trong một yêu cầu, nhãn "Image 0_0", "Image 0_1", ...
     const pieces = [];
     for (const t of tiles) {
       pieces.push({ mime: t.mime, base64: bytesToBase64(new Uint8Array(await t.blob.arrayBuffer())) });
     }
-    const perPiece = await callGeminiPieces(apiKey, pieces, targetLang);
+    const perPiece = await callGeminiPieces(apiKey, pieces, targetLang, 0);
+    // Đoạn nào không có trong kết quả gộp thì gửi riêng đoạn đó
+    for (let i = 0; i < tiles.length; i++) {
+      if (perPiece[i] === null) {
+        console.warn(`[TILE] đoạn ${i} thiếu trong kết quả gộp, gửi riêng`);
+        perPiece[i] = await callGemini(apiKey, pieces[i].base64, pieces[i].mime, targetLang);
+      }
+    }
     tiles.forEach((t, i) => {
       all = all.concat(itemsFromTileBlocks(perPiece[i] || [], t, W, fullCtx));
     });
