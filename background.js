@@ -226,9 +226,11 @@ function normalizeBox(raw) {
   const boxes = Array.isArray(raw[0]) ? raw : [raw];
   let ymin = Infinity, xmin = Infinity, ymax = -Infinity, xmax = -Infinity;
   for (const bx of boxes) {
-    if (!Array.isArray(bx) || bx.length !== 4) continue;
-    const [a, b2, c, d] = bx.map((v) => Number(v));
-    if ([a, b2, c, d].some((v) => Number.isNaN(v))) continue;
+    if (!Array.isArray(bx)) continue;
+    // Model hay trả thêm phần tử không phải số (ví dụ "rect" sau toạ độ): chỉ giữ 4 số toạ độ
+    const nums = bx.filter((v) => typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))));
+    if (nums.length !== 4) continue;
+    const [a, b2, c, d] = nums.map((v) => Number(v));
     ymin = Math.min(ymin, a);
     xmin = Math.min(xmin, b2);
     ymax = Math.max(ymax, c);
@@ -368,13 +370,26 @@ function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
     console.warn('[OCR] bỏ khối: không thấy nét chữ trong vùng text_box', { original: b.original, raw, bg, ink });
     return null;
   }
-  const ellipse = fromBubble && String(b.shape || '').toLowerCase() === 'ellipse';
+  const ellipse = fromBubble && shapeOf(b) === 'ellipse';
   return {
     box, conf: 100, original: b.original || '', translated: b.translated, bg, raw,
     fromBubble, shape: ellipse ? 'ellipse' : 'rect',
     linePx: linePitch(b, ink || box),
     fontPx: fontPxFrom(b, H),
   };
+}
+
+// Hình dạng khung: ưu tiên trường shape. Nếu trường đó thiếu hoặc không hợp lệ thì lấy phần tử
+// 'ellipse'/'rect' mà model lỡ đặt trong mảng toạ độ. Không có thì trả về '' (xử lý như bình thường).
+function shapeOf(b) {
+  const s = String(b.shape || '').trim().toLowerCase();
+  if (s === 'ellipse' || s === 'rect') return s;
+  for (const arr of [b.bubble_box, b.text_box, b.box]) {
+    if (!Array.isArray(arr)) continue;
+    const tag = arr.find((v) => typeof v === 'string' && /^\s*(ellipse|rect)\s*$/i.test(v));
+    if (tag) return tag.trim().toLowerCase();
+  }
+  return '';
 }
 
 // Đọc khung chữ và khung bong bóng của một khối (chuẩn hoá 0-1000)
