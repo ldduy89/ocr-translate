@@ -1018,18 +1018,33 @@ async function translateAll(tabId, urls) {
   // Trừ lượt theo số ảnh được chọn; ảnh không dịch được (lỗi, không có chữ) sẽ được hoàn lại ở cuối.
   // Đặt trạng thái "đang chạy" trước để side panel luôn nhận được lúc kết thúc, kể cả khi trừ lượt thất bại.
   await setJob(tabId, 'running');
-  let ref = null;
+  // Server chỉ nhận tối đa 50 lượt trong một lần trừ, nên chia thành nhiều lần trừ
+  const CHARGE_MAX = 50;
+  let refs = []; // [{ ref, count }] các lần trừ đã thành công, để hoàn lại khi cần
   const stats = { drawn: 0 };
   try {
     try {
-      ref = await Account.charge(list.length);
+      for (let i = 0; i < list.length; i += CHARGE_MAX) {
+        const count = Math.min(CHARGE_MAX, list.length - i);
+        const ref = await Account.charge(count);
+        refs.push({ ref, count });
+      }
     } catch (err) {
+      // Trừ thiếu (hết lượt, lỗi mạng...): hoàn những lần đã trừ rồi dừng
+      for (const r of refs) await Account.refund(r.ref, r.count);
+      refs = [];
       notify(tabId, { type: 'SHOW_ERROR', error: err.message });
       return;
     }
     await translateAllGemini(tabId, list, stats);
   } finally {
-    if (ref) await Account.refund(ref, list.length - stats.drawn);
+    // Hoàn lượt cho ảnh không dịch được, theo thứ tự các lần trừ
+    let toRefund = list.length - stats.drawn;
+    for (const r of refs) {
+      const n = Math.min(r.count, toRefund);
+      if (n > 0) await Account.refund(r.ref, n);
+      toRefund -= n;
+    }
     await setJob(tabId, 'idle');
   }
 }

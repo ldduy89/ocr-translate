@@ -73,6 +73,38 @@
       background-position: right 10px center;
       cursor: pointer;
     }
+    /* Modal thông tin tài khoản (cùng bảng màu tối với phần còn lại của extension) */
+    .uc { background: #2c313a; color: #dcdfe4; border-color: #3a3f4b; max-width: 340px; padding: 18px; }
+    .uc h2 { display: flex; align-items: center; justify-content: space-between; font-size: 16px; font-weight: 700; color: #dcdfe4; margin: 0 0 16px; }
+    .uc .x { background: none; border: 0; color: #9aa3b2; cursor: pointer; font-size: 24px; line-height: 1; padding: 0 2px; }
+    .uc .x:hover { color: #dcdfe4; }
+    .uc .who { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .uc .avatar { width: 56px; height: 56px; flex: none; border-radius: 50%; background: #3d8b7f; color: #f3f4f6; font-size: 24px; font-weight: 600; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #2c313a, 0 0 0 4px #61afef; }
+    .uc .meta { flex: 1; min-width: 0; }
+    .uc .nm { font-size: 16px; font-weight: 700; color: #dcdfe4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .uc .em { font-size: 13px; color: #9aa3b2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .uc .ibtn2 { width: 40px; height: 40px; flex: none; border: 1px solid #454c5a; border-radius: 10px; background: #353b46; color: #cbd5e1; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+    .uc .ibtn2:hover { background: #3f4653; color: #61afef; }
+    .uc .ibtn2:disabled { opacity: .5; cursor: default; }
+    .uc .ibtn2 svg { width: 18px; height: 18px; }
+    .uc .ibtn2.spinning svg { animation: uc-spin .8s linear infinite; }
+    @keyframes uc-spin { to { transform: rotate(360deg); } }
+    .uc .row2 { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-radius: 8px; background: #252a32; border: 1px solid #3a3f4b; margin-bottom: 10px; font-size: 14px; color: #9aa3b2; }
+    .uc .row2 b { color: #dcdfe4; font-weight: 700; }
+    .uc .row2.red { background: rgba(224, 108, 117, .12); border-color: rgba(224, 108, 117, .35); }
+    .uc .row2.red b { color: #e06c75; font-size: 16px; }
+    .uc .box { border: 1px solid #3b5573; background: rgba(97, 175, 239, .08); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; font-size: 13px; color: #9aa3b2; }
+    .uc .box .line { display: flex; justify-content: space-between; margin: 3px 0; }
+    .uc .box .g { color: #98c379; font-weight: 700; }
+    .uc .box .b { color: #61afef; font-weight: 700; }
+    .uc #acctMsg { color: #e06c75; font-size: 12px; margin: 0 0 10px; }
+    .uc .btns { display: flex; gap: 10px; }
+    .uc .btn-blue, .uc .btn-red { flex: 1; padding: 10px 12px; border-radius: 8px; font: inherit; font-weight: 600; font-size: 14px; cursor: pointer; }
+    .uc .btn-blue { border: 1px solid #61afef; background: #61afef; color: #111; }
+    .uc .btn-blue:hover { filter: brightness(1.08); }
+    .uc .btn-blue:disabled { opacity: .6; cursor: default; }
+    .uc .btn-red { background: transparent; border: 1px solid #e06c75; color: #e06c75; }
+    .uc .btn-red:hover { background: rgba(224, 108, 117, .12); }
   </style>
 </head>
 <body>
@@ -99,19 +131,26 @@
   </div>
 
   <div id="userModal" class="modal">
-    <div class="dialog">
-      <h2>Tài khoản</h2>
-      <div class="acct">
-        <div class="line"><span class="k">Email</span><span class="v" id="acctEmail">Chưa đăng nhập</span></div>
-        <div class="line"><span class="k">Lượt miễn phí</span><span class="v" id="acctFree">–</span></div>
-        <div class="line"><span class="k">Lượt đã mua</span><span class="v" id="acctPaid">–</span></div>
-        <div class="line total"><span class="k">Tổng còn lại</span><span class="v" id="acctCredits">–</span></div>
+    <div class="dialog uc">
+      <h2>Thông tin tài khoản <button class="x" id="closeUser" aria-label="Đóng">×</button></h2>
+      <div class="who">
+        <div class="avatar" id="acctAvatar">?</div>
+        <div class="meta">
+          <div class="nm" id="acctName">Chưa đăng nhập</div>
+          <div class="em" id="acctEmail"></div>
+        </div>
+        <button class="ibtn2" id="refreshAcctBtn" title="Làm mới thông tin" aria-label="Làm mới thông tin" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg></button>
+      </div>
+      <div class="row2"><span>Gói hiện tại</span><b id="acctPlan">–</b></div>
+      <div class="row2 red"><span>Lượt còn lại</span><b id="acctCredits">–</b></div>
+      <div class="box">
+        <div class="line"><span>Lượt đã mua</span><span class="g" id="acctPaid">–</span></div>
+        <div class="line"><span>Lượt miễn phí</span><span class="b" id="acctFree">–</span></div>
       </div>
       <div id="acctMsg"></div>
-      <div class="row">
-        <button class="btn" id="loginBtn">Đăng nhập Google</button>
-        <button class="btn" id="logoutBtn" style="display:none">Đăng xuất</button>
-        <button class="btn primary" id="closeUser">Xong</button>
+      <div class="btns">
+        <button class="btn-blue" id="loginBtn">Đăng nhập Google</button>
+        <button class="btn-red" id="logoutBtn" style="display:none">Đăng xuất</button>
       </div>
     </div>
   </div>

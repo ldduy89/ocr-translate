@@ -136,14 +136,43 @@ function showAcctMsg(text) {
 function renderAccount() {
   const u = account && account.user;
   $('userBtn').title = u ? `${u.email}: còn ${u.credits} lượt dịch (miễn phí ${u.credits_free ?? 0}, đã mua ${u.credits_paid ?? 0})` : 'Đăng nhập Google';
-  $('acctEmail').textContent = u ? u.email : 'Chưa đăng nhập';
+  const initial = u ? String(u.name || u.email || '?').trim().charAt(0).toUpperCase() : '?';
+  $('acctAvatar').textContent = initial || '?';
+  $('acctName').textContent = u ? (u.name || u.email) : 'Chưa đăng nhập';
+  $('acctEmail').textContent = u ? u.email : '';
+  $('acctPlan').textContent = u ? ((u.credits_paid ?? 0) > 0 ? 'Đã mua lượt' : 'Miễn phí') : '–';
   $('acctFree').textContent = u ? String(u.credits_free ?? 0) : '–';
   $('acctPaid').textContent = u ? String(u.credits_paid ?? 0) : '–';
   $('acctCredits').textContent = u ? String(u.credits) : '–';
   $('loginBtn').style.display = u ? 'none' : '';
   $('logoutBtn').style.display = u ? '' : 'none';
+  $('refreshAcctBtn').style.display = u ? '' : 'none';
   updateFooter();
 }
+
+// Làm mới số lượt và thông tin từ server theo nút trong modal
+let refreshingAcct = false;
+async function refreshAccount() {
+  if (!account || refreshingAcct) return;
+  refreshingAcct = true;
+  const btn = $('refreshAcctBtn');
+  btn.disabled = true;
+  btn.classList.add('spinning');
+  showAcctMsg('');
+  try {
+    const next = await Account.refresh();
+    account = next;
+    if (!next) showAcctMsg('Phiên đăng nhập đã hết. Hãy đăng nhập lại.');
+  } catch (err) {
+    showAcctMsg(err.message);
+  } finally {
+    refreshingAcct = false;
+    btn.disabled = false;
+    btn.classList.remove('spinning');
+    renderAccount();
+  }
+}
+$('refreshAcctBtn').onclick = refreshAccount;
 
 let loggingIn = false;
 async function doLogin() {
