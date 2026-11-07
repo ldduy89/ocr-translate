@@ -757,21 +757,23 @@ function analyzeBox(data, W, H, box) {
   return { box: snapped, bg };
 }
 
-// ---------- Ảnh rất cao (> 7000px): cắt thành đoạn 4000px, chồng 300px ----------
+// ---------- Ảnh cao (> 6000px): cắt đôi, mỗi đoạn không quá 5000px ----------
 // Bật/tắt việc cắt ảnh cao (ảnh > TALL_LIMIT được cắt thành đoạn)
 const SPLIT_TALL_IMAGES = true;
-const TALL_LIMIT = 7000;
-const TILE_H = 4000;
-const TILE_OVERLAP = 300;
+const TALL_LIMIT = 6000; // ảnh cao hơn mức này mới bị cắt
+const TILE_MAX = 5000;   // mỗi đoạn tối đa 5000px
+const CUT_SEARCH = 600;  // tìm dòng cắt trong khoảng +-600px quanh điểm giữa
 
-// Tìm dòng cắt an toàn gần vị trí mong muốn: dòng gần như đồng màu (khoảng trống giữa các khung),
-// không có nét chữ hay viền bong bóng đi ngang
-function findCutRow(img, W, lo, hi) {
+// Tìm dòng cắt an toàn trong [lo, hi], ưu tiên gần `target`: khoảng trống đồng màu giữa các khung,
+// không có nét chữ hay viền bong bóng đi ngang. Chấm điểm cả một dải 7 dòng quanh dòng cắt
+// để tránh cắt sát mép chữ hoặc mép bong bóng.
+function findCutRow(img, W, lo, hi, target) {
+  const H = img.length / (W * 4);
   const lum = (x, y) => {
     const o = (y * W + x) * 4;
     return 0.299 * img[o] + 0.587 * img[o + 1] + 0.114 * img[o + 2];
   };
-  const score = (y) => {
+  const rowScore = (y) => {
     let sc = 0;
     for (let x = 0; x < W; x += 2) {
       sc += Math.abs(lum(x, y) - lum(x, y - 1));
@@ -779,15 +781,24 @@ function findCutRow(img, W, lo, hi) {
     }
     return sc;
   };
-  let best = hi;
+  const cache = new Map();
+  const rs = (y) => {
+    if (y < 1 || y >= H) return 0;
+    if (!cache.has(y)) cache.set(y, rowScore(y));
+    return cache.get(y);
+  };
+  let best = Math.min(hi, Math.max(lo, target));
   let bestScore = Infinity;
-  for (let y = hi; y >= lo; y--) {
-    const sc = score(y);
-    if (sc < bestScore) {
+  let bestDist = Infinity;
+  for (let y = lo; y <= hi; y++) {
+    let sc = 0;
+    for (let k = -3; k <= 3; k++) sc += rs(y + k);
+    const dist = Math.abs(y - target);
+    if (sc < bestScore || (sc === bestScore && dist < bestDist)) {
       bestScore = sc;
+      bestDist = dist;
       best = y;
     }
-    if (sc === 0) break;
   }
   return best;
 }
@@ -806,17 +817,26 @@ async function imageTiles(blob, mime) {
   }
 
   const img = fullCtx.getImageData(0, 0, W, H).data;
+  // Chia đều: ít nhất 2 đoạn, đủ nhiều để mỗi đoạn <= TILE_MAX
+  const n = Math.max(2, Math.ceil(H / TILE_MAX));
+  const cuts = [0];
+  for (let i = 1; i < n; i++) {
+    const prev = cuts[cuts.length - 1];
+    const target = Math.round((H * i) / n);
+    // Đoạn hiện tại <= TILE_MAX, và phần còn lại vẫn chia được cho (n - i) đoạn <= TILE_MAX
+    const lo = Math.max(prev + 1, target - CUT_SEARCH, H - (n - i) * TILE_MAX);
+    const hi = Math.min(H - 1, target + CUT_SEARCH, prev + TILE_MAX);
+    cuts.push(findCutRow(img, W, Math.min(lo, hi), hi, target));
+  }
+  cuts.push(H);
   const tiles = [];
-  let y0 = 0;
-  while (true) {
-    const end = y0 + TILE_H >= H ? H : findCutRow(img, W, y0 + TILE_H - 600, y0 + TILE_H);
-    const h = end - y0;
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const y0 = cuts[i];
+    const h = cuts[i + 1] - y0;
     const c = new OffscreenCanvas(W, h);
     c.getContext('2d').drawImage(bitmap, 0, y0, W, h, 0, 0, W, h);
     const tb = await c.convertToBlob({ type: 'image/jpeg', quality: 0.92 });
     tiles.push({ blob: tb, mime: 'image/jpeg', y0, h });
-    if (end >= H) break;
-    y0 = end;
   }
   bitmap.close();
   return { W, H, fullCtx, tiles };
@@ -943,29 +963,6 @@ async function geminiImageBlocks(tabId, srcUrl, targetLang) {
   return geminiImageItems(blob, mime, key, targetLang);
 }
 
-// Vùng chọn: cắt ảnh chụp rồi gửi Gemini
-async function geminiRegion({ dataUrl, rect, dpr }, targetLang) {
-  const key = await getGeminiKey();
-  const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
-  const sx = Math.round(rect.x * dpr);
-  const sy = Math.round(rect.y * dpr);
-  const sw = Math.round(rect.w * dpr);
-  const sh = Math.round(rect.h * dpr);
-  const canvas = new OffscreenCanvas(sw, sh);
-  canvas.getContext('2d').drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
-  bitmap.close();
-  const blob = await canvas.convertToBlob({ type: 'image/png' });
-  const base64 = bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
-  const blocks = (await callGemini(key, base64, 'image/png', targetLang)).filter((b) => b && b.translated);
-  if (!blocks.length) throw new Error('Gemini không tìm thấy chữ trong vùng chọn.');
-  return {
-    original: blocks.map((b) => b.original || '').join('\n'),
-    translated: blocks.map((b) => b.translated).join('\n'),
-  };
-}
-
-
-
 // ---------- Dịch một ảnh (chuột phải) ----------
 async function runImageViewer(tabId, srcUrl, quiet = false) {
   try {
@@ -990,20 +987,6 @@ async function runImageViewer(tabId, srcUrl, quiet = false) {
   }
 }
 
-// ---------- Chọn vùng (Ctrl+C+C) ----------
-async function runPipeline(tabId, prepare) {
-  try {
-    const { targetLang } = await getSettings();
-    notify(tabId, { type: 'SHOW_LOADING' });
-    const payload = await prepare();
-    const { original, translated } = await geminiRegion(payload, targetLang);
-    notify(tabId, { type: 'SHOW_RESULT', original, translated });
-  } catch (err) {
-    console.error('[OCR]', err);
-    notify(tabId, { type: 'SHOW_ERROR', error: err.message });
-  }
-}
-
 // ---------- Dịch tất cả ảnh trên trang ----------
 async function translateAll(tabId, urls) {
   const list = [...new Set(urls)];
@@ -1019,16 +1002,6 @@ async function translateAll(tabId, urls) {
   }
 }
 
-// ---------- Phím tắt và chọn vùng ----------
-chrome.commands.onCommand.addListener(async (command) => {
-  if (command === 'start-ocr') await startSelectionOnActiveTab();
-});
-
-async function startSelectionOnActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id) notify(tab.id, { type: 'START_SELECTION' });
-}
-
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'TRANSLATE_ONE' && sender.tab) {
     // Nút "Dịch ảnh" trên từng ảnh: dịch đúng ảnh đó, báo kết quả về để nút đổi trạng thái
@@ -1037,12 +1010,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       () => sendResponse({ ok: false })
     );
     return true;
-  }
-  if (msg.type === 'CAPTURE' && sender.tab) {
-    runPipeline(sender.tab.id, async () => {
-      const dataUrl = await chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: 'png' });
-      return { type: 'OCR', dataUrl, rect: msg.rect, dpr: msg.dpr };
-    });
   }
   if (msg.type === 'REBIND_URL' && sender.tab) {
     // Trang đổi link ảnh đã dịch: đổi khoá URL ở trạng thái "Đã dịch" để side panel khớp ảnh mới

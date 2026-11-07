@@ -2,26 +2,7 @@
   if (window.__ocrTranslateInjected) return;
   window.__ocrTranslateInjected = true;
 
-  let overlay = null;
-  let box = null;
   let panel = null;
-  let startX = 0;
-  let startY = 0;
-
-  // Ctrl+C+C (Cmd+C+C trên Mac): nhấn Copy hai lần trong 500ms để bật chọn vùng
-  let lastCopyTime = 0;
-  document.addEventListener('keydown', (e) => {
-    const isCopy = (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
-                   (e.key === 'c' || e.key === 'C');
-    if (!isCopy || e.repeat) return;
-    const now = Date.now();
-    if (now - lastCopyTime < 500) {
-      lastCopyTime = 0;
-      startSelection();
-    } else {
-      lastCopyTime = now;
-    }
-  }, true);
 
   // Ghi nhớ ảnh vừa chuột phải để biết phủ bản dịch lên đúng thẻ <img>
   let lastContextImg = null;
@@ -33,9 +14,7 @@
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg.type) {
       case 'LIST_IMAGES':     listPageImages().then(sendResponse); return true;
-      case 'START_SELECTION': startSelection(); break;
       case 'SHOW_LOADING':    showPanel('Đang nhận dạng và dịch...', null); break;
-      case 'SHOW_RESULT':     showPanel(msg.translated, msg.original); break;
       case 'SHOW_ERROR':      showPanel('⚠ ' + msg.error, null); refreshPill(); break;
       case 'HIDE_PANEL':      removePanel(); break;
       case 'OVERLAY_IMAGE':   overlayImage(msg); break;
@@ -50,7 +29,7 @@
   });
 
   // ---------- Theo dõi thay đổi ảnh trên trang -> báo side panel làm mới danh sách ----------
-  const OWN_SELECTOR = '#ocr-pill-host, .ocr-img-overlay, #ocr-panel, #ocr-overlay';
+  const OWN_SELECTOR = '#ocr-pill-host, .ocr-img-overlay, #ocr-panel';
   function isOwnNode(n) {
     const el = n && n.nodeType === 1 ? n : (n && n.parentElement);
     return !!(el && el.closest && el.closest(OWN_SELECTOR));
@@ -89,75 +68,6 @@
     }, true);
   }
   startImageWatch();
-
-  function startSelection() {
-    removePanel();
-    cleanupSelection();
-
-    overlay = document.createElement('div');
-    overlay.id = 'ocr-overlay';
-    overlay.innerHTML = '<div class="ocr-hint">Kéo chuột để chọn vùng chữ · Esc để hủy</div>';
-
-    box = document.createElement('div');
-    box.className = 'ocr-box';
-    box.style.display = 'none';
-    overlay.appendChild(box);
-
-    overlay.addEventListener('mousedown', onMouseDown);
-    document.addEventListener('keydown', onKeyDown, true);
-    document.body.appendChild(overlay);
-  }
-
-  function onMouseDown(e) {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    startX = e.clientX;
-    startY = e.clientY;
-    box.style.display = 'block';
-    updateBox(e.clientX, e.clientY);
-    overlay.addEventListener('mousemove', onMouseMove);
-    overlay.addEventListener('mouseup', onMouseUp, { once: true });
-  }
-
-  function onMouseMove(e) {
-    updateBox(e.clientX, e.clientY);
-  }
-
-  function updateBox(x, y) {
-    Object.assign(box.style, {
-      left: Math.min(startX, x) + 'px',
-      top: Math.min(startY, y) + 'px',
-      width: Math.abs(x - startX) + 'px',
-      height: Math.abs(y - startY) + 'px',
-    });
-  }
-
-  function onMouseUp(e) {
-    const rect = {
-      x: Math.min(startX, e.clientX),
-      y: Math.min(startY, e.clientY),
-      w: Math.abs(e.clientX - startX),
-      h: Math.abs(e.clientY - startY),
-    };
-    cleanupSelection();
-    if (rect.w < 10 || rect.h < 10) return;
-
-    // Đợi overlay được gỡ khỏi màn hình rồi mới chụp
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      chrome.runtime.sendMessage({ type: 'CAPTURE', rect, dpr: window.devicePixelRatio });
-    }));
-  }
-
-  function onKeyDown(e) {
-    if (e.key === 'Escape') cleanupSelection();
-  }
-
-  function cleanupSelection() {
-    document.removeEventListener('keydown', onKeyDown, true);
-    overlay?.remove();
-    overlay = null;
-    box = null;
-  }
 
   function showPanel(translated, original) {
     removePanel();
