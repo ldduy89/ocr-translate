@@ -388,6 +388,7 @@ function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
     linePx: linePitch(b, ink || box),
     // font_size của Gemini tính theo chiều cao của đoạn ảnh đang gửi (khi cắt ảnh dài là đoạn, không phải cả ảnh)
     fontPx: fontPxFrom(b, clipY ? clipY.y1 - clipY.y0 : H),
+    inkBox: ink ? { x0: ink.x0, y0: ink.y0, x1: ink.x1, y1: ink.y1 } : null,
   };
 }
 
@@ -481,6 +482,8 @@ function countReminder(n) {
 }
 
 const BATCH_MAX_IMAGES = 8; // lô nhỏ: model lite hay trả "no text" hàng loạt khi lô lớn
+const PARALLEL_REQUESTS = 3; // số request chạy đồng thời (Promise.all)
+const BATCH_PAUSE_MS = 3000; // nghỉ sau mỗi nhóm request rồi mới gửi nhóm kế
 const BATCH_MAX_BYTES = 10 * 1024 * 1024;
 const EXTRA_ROUND = 4; // vòng cuối: chỉ chạy khi vòng 3 còn > 1 ảnh rỗng; chạy xong thì dừng
 
@@ -619,10 +622,28 @@ Many consecutive images may contain no text at all (just artwork or empty space)
 
   // Vòng 1: gửi theo lô, vẽ ngay những ảnh đã có chữ. Ảnh trả rỗng/thiếu bị nghi
   // (model lite hay gán "no text" nhầm) -> gom lại để hỏi tiếp ở vòng 2.
+  // Gửi các lô theo nhóm PARALLEL_REQUESTS request cùng lúc (Promise.all). Xong một nhóm thì xử lý kết quả,
+  // nghỉ BATCH_PAUSE_MS rồi mới gửi nhóm kế.
+  const askParallel = async (groups, hint, onResults) => {
+    for (let k = 0; k < groups.length; k += PARALLEL_REQUESTS) {
+      const part = groups.slice(k, k + PARALLEL_REQUESTS);
+      const res = await Promise.all(part.map((g) =>
+        askBatch(g, hint).then((perImage) => ({ g, perImage }), (err) => ({ g, err }))
+      ));
+      await onResults(res);
+      if (k + PARALLEL_REQUESTS < groups.length) await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
+    }
+  };
+
   const suspects = [];
-  for (const batch of batches) {
-    try {
-      const perImage = await askBatch(batch);
+  await askParallel(batches, undefined, async (res) => {
+    for (const { g: batch, perImage, err } of res) {
+      if (err) {
+        console.error('[OCR] lô Gemini lỗi', err);
+        batchErrors.push(...batch);
+        notify(tabId, { type: 'SHOW_ERROR', error: err.message });
+        continue;
+      }
       for (let i = 0; i < batch.length; i++) {
         const blocks = perImage[i];
         if (blocks === null || blocks.length === 0) {
@@ -631,12 +652,8 @@ Many consecutive images may contain no text at all (just artwork or empty space)
         }
         await showBlocks(batch[i], blocks, true);
       }
-    } catch (err) {
-      console.error('[OCR] lô Gemini lỗi', err);
-      batchErrors.push(...batch);
-      notify(tabId, { type: 'SHOW_ERROR', error: err.message });
     }
-  }
+  });
 
   // Chia ảnh thành các lô theo số lượng và dung lượng
   const makeGroups = (imgs) => {
@@ -660,21 +677,20 @@ Many consecutive images may contain no text at all (just artwork or empty space)
   // failed: ảnh có yêu cầu bị lỗi (mạng, quota, JSON hỏng), không tính vào ngưỡng
   const runRecheckRound = async (imgs, round) => {
     const empty = [], failed = [];
-    for (const group of makeGroups(imgs)) {
-      let perImage;
-      try {
-        perImage = await askBatch(group, RECHECK_HINT);
-      } catch (err) {
-        console.error(`[OCR] lô kiểm tra lại (vòng ${round}) lỗi`, err);
-        failed.push(...group);
-        continue;
+    await askParallel(makeGroups(imgs), RECHECK_HINT, async (res) => {
+      for (const { g: group, perImage, err } of res) {
+        if (err) {
+          console.error(`[OCR] lô kiểm tra lại (vòng ${round}) lỗi`, err);
+          failed.push(...group);
+          continue;
+        }
+        for (let i = 0; i < group.length; i++) {
+          const blocks = perImage[i];
+          if (blocks && blocks.length) await showBlocks(group[i], blocks, false, round);
+          else empty.push(group[i]);
+        }
       }
-      for (let i = 0; i < group.length; i++) {
-        const blocks = perImage[i];
-        if (blocks && blocks.length) await showBlocks(group[i], blocks, false, round);
-        else empty.push(group[i]);
-      }
-    }
+    });
     return { empty, failed };
   };
 
@@ -941,6 +957,8 @@ async function itemsFromTileLocal(blocks, tile, W) {
       console.warn('[OCR] bỏ khối: buildItem không tạo khung', { original: b.original, raw, bubble: bubbleNb });
       continue;
     }
+    // Gemini trả nhiều bubble_box cho một khối = khối gộp nhiều bong bóng: vẫn vẽ, nhưng không đo độ lệch
+    it.merged = rectsOf(b.bubble_box).length > 1;
     items.push(it);
   }
   console.log(`[TILE] đoạn ${tile.y0}..${tile.y0 + H}: ${blocks.length} khối -> vẽ ${items.length}`);
@@ -950,6 +968,31 @@ async function itemsFromTileLocal(blocks, tile, W) {
     it.box.y1 += tile.y0;
     it.raw.y0 += tile.y0;
     it.raw.y1 += tile.y0;
+    if (it.inkBox) {
+      it.inkBox.y0 += tile.y0;
+      it.inkBox.y1 += tile.y0;
+    }
+  }
+  // Log độ lệch: chữ gốc (nét chữ thật) so với khung sub sẽ vẽ. dx/dy > 0 nghĩa là sub nằm bên phải/dưới chữ gốc.
+  const lechItems = items.filter((it) => !it.merged);
+  const skipped = items.filter((it) => it.merged).map((it) => String(it.original).slice(0, 30));
+  if (skipped.length) console.log(`[LECH] bỏ qua ${skipped.length} khối gộp nhiều bong bóng:`, skipped);
+  if (lechItems.length) {
+    console.log(`[LECH] đoạn y0=${tile.y0}, kích thước ${W}x${H}px`);
+    console.table(lechItems.map((it) => {
+      const bx = it.box, ib = it.inkBox;
+      const cx = (bx.x0 + bx.x1) / 2, cy = (bx.y0 + bx.y1) / 2;
+      const ix = ib ? (ib.x0 + ib.x1) / 2 : null, iy = ib ? (ib.y0 + ib.y1) / 2 : null;
+      return {
+        text: String(it.original).slice(0, 30),
+        chu_goc_px: ib ? [Math.round(ib.x0), Math.round(ib.y0), Math.round(ib.x1), Math.round(ib.y1)] : '(không có)',
+        sub_px: [Math.round(bx.x0), Math.round(bx.y0), Math.round(bx.x1), Math.round(bx.y1)],
+        dx_px: ib ? Math.round(cx - ix) : null,
+        dy_px: ib ? Math.round(cy - iy) : null,
+        dx_don_vi: ib ? Math.round(((cx - ix) / W) * 1000) : null,
+        dy_don_vi: ib ? Math.round(((cy - iy) / H) * 1000) : null,
+      };
+    }));
   }
   return items;
 }
@@ -1026,7 +1069,6 @@ const TALL_BATCH_PIECES = 8; // mỗi request gom tối đa 8 đoạn ảnh dài
 async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
   // gi = số thứ tự ảnh trong cả lượt dịch; nhãn đoạn là gi_i nên cùng một đoạn luôn có cùng nhãn ở mọi lô
   const recs = imgs.map((img, gi) => ({ img, gi, W: 0, H: 0, tiles: [], all: [], raw: [], error: null, pending: 0, result: null }));
-  const queue = []; // [{ rec, i }] các đoạn đang chờ gửi
 
   // Ảnh đã xong hết đoạn: gom kết quả, gọi onDone để vẽ ngay
   const finishRec = async (rec) => {
@@ -1070,7 +1112,8 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
             blocks = await callGemini(apiKey, pc.base64, pc.mime, targetLang);
           }
           pc.rec.raw.push(...blocks.map((b) => ({ ...b, _piece: pc.label })));
-          pc.rec.all = pc.rec.all.concat(await itemsFromTileLocal(blocks, pc.tile, pc.rec.W));
+          const its = await itemsFromTileLocal(blocks, pc.tile, pc.rec.W);
+          pc.rec.all = pc.rec.all.concat(its);
         }
       } catch (err) {
         console.error('[OCR] lô ảnh dài lỗi', err);
@@ -1085,6 +1128,7 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
     }
   };
 
+  // Bước 1: cắt tất cả ảnh dài thành đoạn
   for (const rec of recs) {
     try {
       const t = await cutToTiles(rec.img.blob, rec.img.mime);
@@ -1095,23 +1139,33 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
     } catch (err) {
       rec.error = err;
       await finishRec(rec);
-      continue;
     }
-    const n = rec.tiles.length;
-    const piecesOf = (r) => r.tiles.map((_, i) => ({ rec: r, i }));
-    if (n > TALL_BATCH_PIECES) {
-      // Ảnh tự dài hơn một request: gửi hết hàng chờ trước, rồi chia ảnh này thành các request đầy đủ
-      if (queue.length) await flush(queue.splice(0));
-      const all = piecesOf(rec);
-      for (let k = 0; k < all.length; k += TALL_BATCH_PIECES) await flush(all.slice(k, k + TALL_BATCH_PIECES));
-      continue;
-    }
-    // Ảnh vừa một request: nếu thêm nó vào sẽ vượt giới hạn thì gửi hàng chờ trước, để không tách ảnh này
-    if (queue.length && queue.length + n > TALL_BATCH_PIECES) await flush(queue.splice(0));
-    queue.push(...piecesOf(rec));
-    if (queue.length === TALL_BATCH_PIECES) await flush(queue.splice(0));
   }
-  if (queue.length) await flush(queue.splice(0));
+
+  // Bước 2: xếp đoạn thành các lô tối đa TALL_BATCH_PIECES đoạn. Không tách một ảnh ra hai lô,
+  // trừ khi chính ảnh đó dài hơn một lô.
+  const batches = [];
+  let cur = [];
+  for (const rec of recs) {
+    if (rec.error || !rec.tiles.length) continue;
+    const piecesOf = rec.tiles.map((_, i) => ({ rec, i }));
+    const n = piecesOf.length;
+    if (n > TALL_BATCH_PIECES) {
+      if (cur.length) { batches.push(cur); cur = []; }
+      for (let k = 0; k < n; k += TALL_BATCH_PIECES) batches.push(piecesOf.slice(k, k + TALL_BATCH_PIECES));
+      continue;
+    }
+    if (cur.length && cur.length + n > TALL_BATCH_PIECES) { batches.push(cur); cur = []; }
+    cur.push(...piecesOf);
+    if (cur.length === TALL_BATCH_PIECES) { batches.push(cur); cur = []; }
+  }
+  if (cur.length) batches.push(cur);
+
+  // Bước 3: gửi PARALLEL_REQUESTS lô cùng lúc bằng Promise.all, xong nghỉ BATCH_PAUSE_MS rồi gửi nhóm kế
+  for (let k = 0; k < batches.length; k += PARALLEL_REQUESTS) {
+    await Promise.all(batches.slice(k, k + PARALLEL_REQUESTS).map((b) => flush(b)));
+    if (k + PARALLEL_REQUESTS < batches.length) await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
+  }
 
   for (const rec of recs) await finishRec(rec); // phòng trường hợp còn sót
   return recs.map((rec) => rec.result);
