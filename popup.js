@@ -95,31 +95,102 @@ let currentTabId = null;
 let busy = false; // đang dịch ở tab hiện tại
 let account = null; // { token, user: { email, name, credits, credits_free, credits_paid, gemini_key } } hoặc null nếu chưa đăng nhập
 
-function fill(sel, options, value) {
-  sel.innerHTML = '';
-  // Sắp xếp theo bảng chữ cái tiếng Việt
-  const collator = new Intl.Collator('vi');
-  const sorted = [...options].sort((a, b) => collator.compare(a[1], b[1]));
-  for (const [v, label] of sorted) {
-    const o = document.createElement('option');
-    o.value = v;
-    o.textContent = label;
-    sel.appendChild(o);
-  }
-  sel.value = options.some(([v]) => v === value) ? value : 'vi';
+// ---------- Ngôn ngữ đích: ô tìm kiếm + danh sách ----------
+const langBox = $('langBox');
+const langInput = $('langInput');
+const langList = $('langList');
+const langCollator = new Intl.Collator('vi'); // sắp xếp theo bảng chữ cái tiếng Việt
+const LANGS = [...TARGET_OPTIONS].sort((x, y) => langCollator.compare(x[1], y[1]));
+let langValue = DEFAULTS.targetLang;
+
+function langLabel(code) {
+  const hit = TARGET_OPTIONS.find(([v]) => v === code);
+  return hit ? hit[1] : code;
 }
 
-// ---------- Cài đặt (modal) ----------
-chrome.storage.sync.get(DEFAULTS).then((s) => fill($('targetLang'), TARGET_OPTIONS, s.targetLang));
+function renderLangList(filter = '') {
+  const q = filter.trim().toLowerCase();
+  const shown = LANGS.filter(([v, label]) => !q || label.toLowerCase().includes(q) || v.toLowerCase().includes(q));
+  langList.innerHTML = '';
+  if (!shown.length) {
+    const empty = document.createElement('div');
+    empty.className = 'lang-empty';
+    empty.textContent = 'Không có ngôn ngữ phù hợp';
+    langList.appendChild(empty);
+    return;
+  }
+  for (const [v, label] of shown) {
+    const row = document.createElement('div');
+    row.className = 'lang-item' + (v === langValue ? ' sel' : '');
+    row.textContent = label;
+    // mousedown (không phải click) để chọn trước khi ô tìm kiếm mất focus
+    row.onmousedown = (e) => { e.preventDefault(); pickLang(v); };
+    langList.appendChild(row);
+  }
+}
 
-$('targetLang').onchange = () => chrome.storage.sync.set({ targetLang: $('targetLang').value });
+function openLang() {
+  langInput.value = '';
+  langInput.placeholder = langLabel(langValue); // đang chọn hiện làm gợi ý, gõ để tìm
+  renderLangList('');
+  langBox.classList.add('open');
+}
 
-$('settings').onclick = () => modal.classList.add('show');
+function closeLang() {
+  langBox.classList.remove('open');
+  langInput.placeholder = '';
+  langInput.value = langLabel(langValue);
+}
+
+function pickLang(code) {
+  langValue = code;
+  chrome.storage.sync.set({ targetLang: code });
+  langInput.blur(); // onblur sẽ đóng danh sách và hiện tên ngôn ngữ đã chọn
+}
+
+langInput.onfocus = openLang;
+langInput.oninput = () => renderLangList(langInput.value);
+langInput.onblur = closeLang;
+langInput.onkeydown = (e) => {
+  if (e.key === 'Escape') langInput.blur();
+  if (e.key === 'Enter') {
+    const first = langList.querySelector('.lang-item');
+    if (first) first.dispatchEvent(new MouseEvent('mousedown'));
+  }
+};
+// Bấm vào biểu tượng kính lúp cũng mở ô tìm kiếm
+document.querySelector('.lang-icon').style.pointerEvents = 'auto';
+document.querySelector('.lang-icon').onclick = () => langInput.focus();
+
+chrome.storage.sync.get(DEFAULTS).then((s) => {
+  langValue = TARGET_OPTIONS.some(([v]) => v === s.targetLang) ? s.targetLang : DEFAULTS.targetLang;
+  langInput.value = langLabel(langValue);
+});
+
+// Mở modal: dialog phóng ra từ icon đã bấm (tính độ lệch từ tâm icon đến tâm dialog)
+function openModal(modalEl, fromBtn) {
+  const dlg = modalEl.querySelector('.dialog');
+  if (fromBtn) {
+    // Tắt transition khi đặt vị trí, để khung nằm sẵn ở icon trước khi phóng ra
+    dlg.style.transition = 'none';
+    dlg.style.transform = 'none';
+    const d = dlg.getBoundingClientRect();
+    dlg.style.transform = '';
+    const r = fromBtn.getBoundingClientRect();
+    dlg.style.setProperty('--fx', ((r.left + r.width / 2) - (d.left + d.width / 2)) + 'px');
+    dlg.style.setProperty('--fy', ((r.top + r.height / 2) - (d.top + d.height / 2)) + 'px');
+    void dlg.offsetWidth; // chốt vị trí thu nhỏ tại icon (lúc này transition đang tắt)
+    dlg.style.transition = '';
+  }
+  modalEl.classList.add('show');
+}
+
+$('settings').onclick = () => openModal(modal, $('settings'));
 $('closeSettings').onclick = () => modal.classList.remove('show');
 modal.onclick = (e) => { if (e.target === modal) modal.classList.remove('show'); };
 
 // ---------- Tài khoản (modal riêng) ----------
-$('userBtn').onclick = () => userModal.classList.add('show');
+$('userBtn').onclick = () => openModal(userModal, $('userBtn'));
 $('closeUser').onclick = () => userModal.classList.remove('show');
 userModal.onclick = (e) => { if (e.target === userModal) userModal.classList.remove('show'); };
 
@@ -146,33 +217,34 @@ function renderAccount() {
   $('acctCredits').textContent = u ? String(u.credits) : '–';
   $('loginBtn').style.display = u ? 'none' : '';
   $('logoutBtn').style.display = u ? '' : 'none';
-  $('refreshAcctBtn').style.display = u ? '' : 'none';
+  $('acctInfo').style.display = u ? '' : 'none';
+  $('acctGuest').style.display = u ? 'none' : '';
   updateFooter();
 }
 
 // Làm mới số lượt và thông tin từ server theo nút trong modal
+// Làm mới số lượt và thông tin từ server (nút có ở cả hai trạng thái)
 let refreshingAcct = false;
 async function refreshAccount() {
-  if (!account || refreshingAcct) return;
+  if (refreshingAcct) return;
   refreshingAcct = true;
-  const btn = $('refreshAcctBtn');
-  btn.disabled = true;
-  btn.classList.add('spinning');
+  const btns = document.querySelectorAll('.refresh-btn');
+  const hadAccount = !!account;
+  btns.forEach((b) => { b.disabled = true; b.classList.add('spinning'); });
   showAcctMsg('');
   try {
     const next = await Account.refresh();
     account = next;
-    if (!next) showAcctMsg('Phiên đăng nhập đã hết. Hãy đăng nhập lại.');
+    if (!next && hadAccount) showAcctMsg('Phiên đăng nhập đã hết. Hãy đăng nhập lại.');
   } catch (err) {
     showAcctMsg(err.message);
   } finally {
     refreshingAcct = false;
-    btn.disabled = false;
-    btn.classList.remove('spinning');
+    btns.forEach((b) => { b.disabled = false; b.classList.remove('spinning'); });
     renderAccount();
   }
 }
-$('refreshAcctBtn').onclick = refreshAccount;
+document.querySelectorAll('.refresh-btn').forEach((b) => { b.onclick = refreshAccount; });
 
 let loggingIn = false;
 async function doLogin() {
@@ -184,7 +256,7 @@ async function doLogin() {
     account = await Account.login(true);
   } catch (err) {
     showAcctMsg(err.message);
-    userModal.classList.add('show'); // cho người dùng thấy lý do lỗi
+    openModal(userModal, $('userBtn')); // cho người dùng thấy lý do lỗi
   } finally {
     loggingIn = false;
     $('loginBtn').disabled = false;
@@ -269,7 +341,8 @@ function render() {
   for (const it of items) {
     const locked = it.done || it.notext;
     const card = document.createElement('label');
-    card.className = 'card' + (it.done ? ' done' : '') + (it.notext ? ' notext' : '') + (!it.checked ? ' off' : '');
+    // Ảnh không có chữ: không hiện ô chọn và không làm mờ; chỉ ảnh đã dịch có nhãn "✓ Đã dịch"
+    card.className = 'card' + (it.done ? ' done' : '') + (!it.checked && !it.notext ? ' off' : '');
 
     const cb = document.createElement('input');
     cb.type = 'checkbox';
@@ -293,7 +366,7 @@ function render() {
 
     const badge = document.createElement('span');
     badge.className = 'badge';
-    badge.textContent = it.done ? '✓ Đã dịch' : 'Không có chữ';
+    badge.textContent = '✓ Đã dịch';
 
     // Ảnh đã dịch / không có chữ: bấm vào thì cuộn trang tới đúng ảnh đó
     if (locked) {
@@ -304,7 +377,11 @@ function render() {
       };
     }
 
-    card.append(cb, img, dim, badge);
+    const parts = [];
+    if (!it.notext) parts.push(cb);
+    parts.push(img, dim);
+    if (it.done) parts.push(badge);
+    card.append(...parts);
     listEl.appendChild(card);
   }
   listEl.scrollTop = scrollTop;

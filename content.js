@@ -14,13 +14,19 @@
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg.type) {
       case 'LIST_IMAGES':     listPageImages().then(sendResponse); return true;
-      case 'SHOW_LOADING':    showPanel('Đang nhận dạng và dịch...', null); break;
-      case 'SHOW_ERROR':      showPanel('⚠ ' + msg.error, null); refreshPill(); break;
-      case 'HIDE_PANEL':      removePanel(); break;
+      case 'SHOW_LOADING':    showToast('Đang nhận dạng và dịch...', 'info', TOAST_MS); break;
+      case 'SHOW_ERROR':      showToast('⚠ ' + msg.error, 'error', TOAST_MS); refreshPill(); break;
+      case 'HIDE_PANEL':      removePanel(); hideToast(); break;
       case 'OVERLAY_IMAGE':   overlayImage(msg); break;
       case 'TRANSLATE_ALL_START': collectAndTranslateAll(msg.urls); break;
-      case 'SHOW_INFO':       showPanel(msg.text, null); break;
+      case 'SHOW_INFO': {
+        // "Đang dịch: x/x" giữ nguyên đến khi xong; thông báo khác tự ẩn sau TOAST_MS
+        const progressing = /^Đang dịch/.test(msg.text);
+        showToast(msg.text, progressing ? 'info' : 'success', progressing ? 0 : TOAST_MS);
+        break;
+      }
       case 'SCROLL_TO_IMAGE': scrollToImage(msg.url); break;
+      case 'NOTEXT':          markNoText(msg.srcUrl); break;
       case 'MENU_TRANSLATE':  sendResponse({ handled: translateFromMenu(msg.srcUrl) }); break;
       case 'FETCH_BLOB':
         blobUrlToDataUrl(msg.url).then((dataUrl) => sendResponse({ dataUrl }), (err) => sendResponse({ error: String(err && err.message || err) }));
@@ -29,7 +35,7 @@
   });
 
   // ---------- Theo dõi thay đổi ảnh trên trang -> báo side panel làm mới danh sách ----------
-  const OWN_SELECTOR = '#ocr-pill-host, .ocr-img-overlay, #ocr-panel';
+  const OWN_SELECTOR = '#ocr-pill-host, .ocr-img-overlay, #ocr-panel, #ocr-toast';
   function isOwnNode(n) {
     const el = n && n.nodeType === 1 ? n : (n && n.parentElement);
     return !!(el && el.closest && el.closest(OWN_SELECTOR));
@@ -68,6 +74,54 @@
     }, true);
   }
   startImageWatch();
+
+  // Thông báo trạng thái / lỗi: toast nhỏ góc dưới phải. ms = 0 thì giữ đến khi tự đóng hoặc có thông báo mới.
+  // Khung "Dịch ảnh" không dùng cho thông báo nữa.
+  const TOAST_MS = 20000; // thời gian tự ẩn của thông báo thường
+  let toastTimer = null;
+  function ensureToast() {
+    let el = document.getElementById('ocr-toast');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'ocr-toast';
+    el.style.cssText = 'all:initial;position:fixed;right:20px;bottom:20px;z-index:2147483646;max-width:340px;display:flex;align-items:flex-start;gap:10px;padding:10px 12px 10px 14px;border-radius:8px;background:#2c313a;color:#dcdfe4;font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.4);border-left:4px solid #61afef;pointer-events:none;opacity:0;transition:opacity .2s;';
+    const text = document.createElement('span');
+    text.className = 'ocr-toast-text';
+    text.style.cssText = 'all:unset;flex:1;min-width:0;word-break:break-word;';
+    const close = document.createElement('button');
+    close.className = 'ocr-toast-x';
+    close.textContent = '×';
+    close.setAttribute('aria-label', 'Đóng');
+    close.style.cssText = 'all:unset;cursor:pointer;color:#9aa3b2;font:18px/1 -apple-system,sans-serif;padding:0 2px;flex:none;';
+    close.onmouseenter = () => { close.style.color = '#dcdfe4'; };
+    close.onmouseleave = () => { close.style.color = '#9aa3b2'; };
+    close.onclick = (e) => { e.stopPropagation(); hideToast(); };
+    el.append(text, close);
+    (document.body || document.documentElement).appendChild(el);
+    return el;
+  }
+
+  function showToast(text, kind = 'info', ms = TOAST_MS) {
+    const el = ensureToast();
+    const color = kind === 'error' ? '#e06c75' : kind === 'success' ? '#98c379' : '#61afef';
+    el.style.borderLeftColor = color;
+    el.querySelector('.ocr-toast-text').textContent = text;
+    el.style.pointerEvents = 'auto'; // bấm được để đóng
+    el.style.opacity = '1';
+    clearTimeout(toastTimer);
+    toastTimer = null;
+    if (ms > 0) toastTimer = setTimeout(hideToast, ms);
+  }
+
+  function hideToast() {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+    const el = document.getElementById('ocr-toast');
+    if (el) {
+      el.style.opacity = '0';
+      el.style.pointerEvents = 'none';
+    }
+  }
 
   function showPanel(translated, original) {
     removePanel();
@@ -297,7 +351,7 @@
       } else {
         if (overlayEntries.get(entry.srcUrl) === entry) { // chưa bị gỡ vì khác tỉ lệ: ẩn tạm, thử lại sau
           layer.style.display = 'none';
-          if (entry.pin) entry.pin.el.style.display = 'none';
+          if (entry.pin) setBtnShown(entry.pin.el, false);
         }
         return;
       }
@@ -563,7 +617,7 @@
 
   // selected: danh sách URL người dùng đã chọn trong side panel; không có thì lấy tất cả
   async function collectAndTranslateAll(selected) {
-    showPanel('Đang tải các ảnh trên trang...', null);
+    showToast('Đang tải các ảnh trên trang...', 'info', TOAST_MS);
     let urls;
     if (Array.isArray(selected)) {
       urls = selected;
@@ -572,7 +626,7 @@
       await Promise.all([...document.images].map(waitLoaded));
       urls = collectImageUrls().map((x) => x.url);
     }
-    showPanel(`Đang dịch ${urls.length} ảnh...`, null);
+    showToast(`Đang dịch ${urls.length} ảnh...`, 'info', 0);
     chrome.runtime.sendMessage({ type: 'TRANSLATE_ALL', urls });
   }
 
@@ -581,6 +635,7 @@
   // góc trên bên phải phần ảnh đang thấy; rời ảnh, cuộn hoặc đổi cỡ cửa sổ thì nút ẩn. Không chạy nền.
   const BTN_TEXT = {
     idle: 'Dịch ảnh',
+    notext: 'Không có chữ',
     loading: 'Đang dịch...',
     shown: '✓ Bản dịch',
     hidden: 'Xem bản dịch',
@@ -606,7 +661,9 @@
     .pill{position:fixed;display:none;align-items:center;gap:8px;height:34px;padding:0 14px 0 5px;border:0;
       border-radius:999px;background:#fff;color:#2a3347;font:600 14px/1 system-ui,"Segoe UI",Roboto,sans-serif;
       box-shadow:0 2px 10px rgba(0,0,0,.3);cursor:pointer;pointer-events:auto;white-space:nowrap;
-      transition:box-shadow .15s}
+      opacity:0;transform:scale(.6);transform-origin:top right;
+      transition:opacity .18s ease,transform .18s ease,box-shadow .15s}
+    .pill.on{opacity:1;transform:scale(1)}
     .pill:hover{box-shadow:0 3px 14px rgba(0,0,0,.4)}
     .pill[data-state=loading]{cursor:progress}
     .ico{display:flex;width:24px;height:24px}
@@ -615,6 +672,7 @@
     @keyframes spin{to{transform:rotate(360deg)}}
     .pill[data-state=shown]{background:#1f9d55;color:#fff}
     .pill[data-state=hidden]{background:#2f7df6;color:#fff}
+    .pill[data-state=notext]{background:#6b7280;color:#fff;cursor:default}
     .pill[data-state=shown] .ico img,.pill[data-state=hidden] .ico img{box-shadow:0 0 0 2px #fff}
     .pill.flash{animation:flash .9s ease-out 2}
     @keyframes flash{
@@ -622,6 +680,25 @@
       30%{transform:scale(1.12)}
       65%{transform:scale(1);box-shadow:0 0 0 16px rgba(31,157,85,0)}
       100%{transform:scale(1);box-shadow:0 2px 10px rgba(0,0,0,.3)}}`;
+
+  // Ẩn/hiện nút có hiệu ứng mờ + thu nhỏ. Hiện: đặt display rồi mới thêm .on để chạy hiệu ứng vào.
+  // Ẩn: bỏ .on rồi sau khi hiệu ứng xong mới đặt display:none.
+  function setBtnShown(el, on) {
+    if (!el) return;
+    clearTimeout(el._hideT);
+    if (on) {
+      if (el._shown) return;
+      el._shown = true;
+      el.style.display = 'flex';
+      void el.offsetWidth; // ép trình duyệt tính layout trước khi đổi opacity/transform
+      el.classList.add('on');
+    } else {
+      if (!el._shown) { el.style.display = 'none'; return; }
+      el._shown = false;
+      el.classList.remove('on');
+      el._hideT = setTimeout(() => { if (!el._shown) el.style.display = 'none'; }, 200);
+    }
+  }
 
   function ensurePill() {
     if (pillHost && pillHost.isConnected) return pill;
@@ -682,11 +759,11 @@
   function updatePin(entry) {
     const v = visibleRect(entry.img);
     if (pendingUrls.has(entry.srcUrl)) { // đang dịch lại: nút xoay thay chỗ nút này
-      if (entry.pin) entry.pin.el.style.display = 'none';
+      if (entry.pin) setBtnShown(entry.pin.el, false);
       return;
     }
     if (!pillsEnabled || v.r - v.l < BTN_MIN || v.b - v.t < 40) { // ảnh cuộn ra khỏi màn hình / quá nhỏ
-      if (entry.pin) entry.pin.el.style.display = 'none';
+      if (entry.pin) setBtnShown(entry.pin.el, false);
       return;
     }
     const pin = ensurePin(entry);
@@ -694,7 +771,7 @@
     pin.el.dataset.state = state;
     pin.label.textContent = BTN_TEXT[state];
     pin.el.title = state === 'shown' ? 'Bấm để xem ảnh gốc' : 'Bấm để xem bản dịch';
-    pin.el.style.display = 'flex';
+    setBtnShown(pin.el, true);
     pin.el.style.left = Math.max(v.l, v.r - pin.el.offsetWidth - 10) + 'px';
     pin.el.style.top = v.t + 10 + 'px';
     // Vừa dịch xong và nút đang hiện: nháy đúng một lần. Lúc overlayImage chạy thì nút còn bị ẩn
@@ -708,7 +785,7 @@
   // Vừa dịch xong: nút nháy/nhún vài lần cho dễ thấy, rồi đứng yên
   function flashPin(entry) {
     const el = entry.pin && entry.pin.el;
-    if (!el || el.style.display === 'none') return;
+    if (!el || !el._shown) return;
     el.classList.remove('flash');
     void el.offsetWidth; // khởi động lại animation
     el.classList.add('flash');
@@ -747,10 +824,10 @@
     }
     const v = p.img.isConnected ? visibleRect(p.img) : null;
     if (!pillsEnabled || !v || v.r - v.l < BTN_MIN || v.b - v.t < 40) { // đang ngoài màn hình: ẩn tạm, cuộn lại sẽ hiện
-      p.btn.el.style.display = 'none';
+      setBtnShown(p.btn.el, false);
       return;
     }
-    p.btn.el.style.display = 'flex';
+    setBtnShown(p.btn.el, true);
     p.btn.el.style.left = Math.max(v.l, v.r - p.btn.el.offsetWidth - 10) + 'px';
     p.btn.el.style.top = v.t + 10 + 'px';
   }
@@ -760,6 +837,7 @@
   }
 
   function pillState(key) {
+    if (noTextKeys.has(key)) return 'notext';
     if (pendingUrls.has(key)) return 'loading';
     const e = overlayEntries.get(key);
     if (!e) return 'idle';
@@ -777,7 +855,7 @@
 
   function onPillClick(img) {
     const key = imgKey(img);
-    if (!key || pendingUrls.has(key)) return;
+    if (!key || pendingUrls.has(key) || noTextKeys.has(key)) return;
     const entry = overlayEntries.get(key);
     if (entry) { // đã dịch: bấm để chuyển qua lại giữa ảnh gốc và bản dịch
       entry.hidden = !entry.hidden;
@@ -845,6 +923,23 @@
     return { l, t, r: rt, b };
   }
 
+  // Ảnh đã biết là không có chữ (background báo về): không hiện nút dịch
+  const noTextKeys = new Set();
+
+  function markNoText(key) {
+    if (!key) return;
+    noTextKeys.add(key);
+    if (pillImg && imgKey(pillImg) === key) refreshPill();
+  }
+
+  // Lúc tải trang: hỏi background danh sách ảnh đã biết là không có chữ của tab này
+  try {
+    chrome.runtime.sendMessage({ type: 'GET_NOTEXT' }, (res) => {
+      void chrome.runtime.lastError;
+      for (const u of (res && res.urls) || []) noTextKeys.add(u);
+    });
+  } catch (_) {}
+
   function eligible(img) {
     const key = imgKey(img);
     if (!key || !/^(https?:|data:image\/|blob:)/.test(key)) return false;
@@ -858,7 +953,7 @@
     refreshPill();
     const v = visibleRect(img);
     if (v.r - v.l < BTN_MIN || v.b - v.t < 40) { hidePill(); return; }
-    p.el.style.display = 'flex';
+    setBtnShown(p.el, true);
     p.el.style.left = Math.max(v.l, v.r - p.el.offsetWidth - 10) + 'px';
     p.el.style.top = v.t + 10 + 'px';
   }
@@ -867,7 +962,7 @@
     clearTimeout(hideTimer);
     hideTimer = null;
     pillImg = null;
-    if (pill) pill.el.style.display = 'none';
+    if (pill) setBtnShown(pill.el, false);
   }
 
   // Tìm <img> đủ lớn nằm dưới con trỏ (kể cả khi bị lớp trong suốt của trang phủ lên)

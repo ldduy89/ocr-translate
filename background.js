@@ -135,7 +135,6 @@ const GEMINI_MODELS = [
   'gemini-3.1-flash-lite',
   'gemini-flash-lite-latest',
   'gemini-3.5-flash-lite',
-  'gemini-3.6-flash',
 ];
 const CYCLE_WAIT_MS = 10000;
 const MAX_CYCLES = 2;
@@ -356,7 +355,19 @@ function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
     box = { x0: r.box.x0, x1: r.box.x1, y0: Math.max(y0lim, r.box.y0), y1: Math.min(y1lim, r.box.y1) };
   }
   // Vùng chữ gần như trống (không có nét chữ nào): khối bị gán nhầm sang ảnh này -> bỏ
-  const ink = inkBounds(data, W, raw, bg);
+  let ink = inkBounds(data, W, raw, bg);
+  // Vùng text_box không có nét chữ nhưng bong bóng thì có: Gemini đặt khung chữ lệch, dùng cả bong bóng
+  if (!ink && bubble) {
+    const bb = { x0: Math.max(0, Math.floor(bubble.x0)), y0: Math.max(0, Math.floor(bubble.y0)), x1: Math.min(W, Math.ceil(bubble.x1)), y1: Math.min(H, Math.ceil(bubble.y1)) };
+    const ink2 = inkBounds(data, W, bb, dominantColor(data, W, bb.x0, bb.y0, bb.x1, bb.y1));
+    if (ink2) {
+      console.warn('[OCR] text_box không có nét chữ, dùng bong bóng thay thế', { original: b.original, raw, bubble: bb });
+      raw = bb;
+      bg = dominantColor(data, W, bb.x0, bb.y0, bb.x1, bb.y1);
+      box = { x0: bb.x0, x1: bb.x1, y0: Math.max(y0lim, bb.y0), y1: Math.min(y1lim, bb.y1) };
+      ink = ink2;
+    }
+  }
   // Chế độ chặt (chỉ dùng cho khối của vòng cuối, dễ bị model "bịa"): vùng chữ thật phải có nền khá đồng màu
   // và có lượng nét chữ hợp lý; vùng tranh vẽ/nhiễu bị loại thay vì vẽ sub đè lên tranh.
   if (strict && ink && (bg.frac < 0.35 || ink.count / ink.area < 0.015)) {
@@ -394,9 +405,25 @@ function shapeOf(b) {
 }
 
 // Đọc khung chữ và khung bong bóng của một khối (chuẩn hoá 0-1000)
+// Danh sách các khung [ymin, xmin, ymax, xmax] trong một trường box (bỏ phần tử không phải số)
+function rectsOf(raw) {
+  if (!Array.isArray(raw) || !raw.length) return [];
+  const boxes = Array.isArray(raw[0]) ? raw : [raw];
+  const out = [];
+  for (const bx of boxes) {
+    if (!Array.isArray(bx)) continue;
+    const nums = bx.filter((v) => typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))));
+    if (nums.length !== 4) continue;
+    out.push(nums.map(Number));
+  }
+  return out;
+}
+
+// Chỉ lấy khung đầu tiên của mỗi trường (bubble_box, text_box). Khi model trả nhiều khung trong một khối
+// thì bỏ qua các khung sau, không gộp.
 function blockBoxes(b) {
-  const bubbleNb = normalizeBox(b.bubble_box) || normalizeBox(b.box);
-  const textNb = normalizeBox(b.text_box) || bubbleNb;
+  const bubbleNb = rectsOf(b.bubble_box)[0] || rectsOf(b.box)[0] || null;
+  const textNb = rectsOf(b.text_box)[0] || bubbleNb;
   return { textNb, bubbleNb };
 }
 
@@ -474,7 +501,11 @@ async function loadImageBlob(tabId, srcUrl) {
 }
 
 // Dịch tất cả ảnh: gửi nhiều ảnh trong một yêu cầu, chia lô khi quá nhiều hoặc quá nặng
+// Dữ liệu block gốc Gemini trả về cho từng ảnh (url -> blocks), dùng để log khi kết thúc
+let geminiReport = new Map();
+
 async function translateAllGemini(tabId, urls, stats = { drawn: 0 }) {
+  geminiReport = new Map();
   const { targetLang } = await getSettings();
   const target = TARGET_NAMES[targetLang] || targetLang;
   const apiKey = await getGeminiKey();
@@ -563,6 +594,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
 
   // Dựng khung và vẽ bản dịch cho một ảnh
   const showBlocks = async (img, blocks, canRecheck, round = 1) => {
+    geminiReport.set(img.srcUrl, blocks);
     const bitmap = await createImageBitmap(img.blob);
     try {
       let items = itemsFromBlocks(blocks, bitmap, round === EXTRA_ROUND); // chỉ kiểm tra chặt ở vòng cuối
@@ -663,11 +695,17 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     ({ empty: emptyImgs, failed: failedImgs } = await runRecheckRound(work, EXTRA_ROUND));
   }
 
-  for (const img of loaded.filter((x) => x.tall)) {
-    try {
-      const { items, width, height } = await geminiImageItems(img.blob, img.mime, apiKey, targetLang);
-      if (items.length) {
-        notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width, height, items });
+  // Ảnh dài: gộp các đoạn vào các lô (xem geminiTallBatch). Mỗi ảnh được vẽ ngay khi xong, không đợi cả lô.
+  const tallImgs = loaded.filter((x) => x.tall);
+  if (tallImgs.length) {
+    await geminiTallBatch(tallImgs, apiKey, targetLang, async (r) => {
+      const img = r.img;
+      if (r.error) {
+        tallErrors.push(img.srcUrl);
+        console.error('[OCR] ảnh rất cao lỗi', img.srcUrl, r.error);
+        notify(tabId, { type: 'SHOW_ERROR', error: r.error.message });
+      } else if (r.items.length) {
+        notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width: r.width, height: r.height, items: r.items });
         ok++;
         progress();
         drawn.add(img.srcUrl);
@@ -675,11 +713,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
       } else {
         tallEmpty.push(img.srcUrl);
       }
-    } catch (err) {
-      tallErrors.push(img.srcUrl);
-      console.error('[OCR] ảnh rất cao lỗi', img.srcUrl, err);
-      notify(tabId, { type: 'SHOW_ERROR', error: err.message });
-    }
+    });
   }
 
   // Tổng kết: mỗi ảnh nằm trong đúng một nhóm
@@ -702,6 +736,25 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     for (const u of urls) console.log('   ' + u);
   }
   if (drawn.size + sumGroups !== list.length) console.warn('[OCR] còn ảnh chưa phân loại:', list.length - drawn.size - sumGroups);
+  console.groupEnd();
+  // Dữ liệu block Gemini theo từng link ảnh (ảnh cao: _piece là nhãn đoạn, toạ độ theo đoạn đó)
+  console.groupCollapsed(`[OCR] DỮ LIỆU GEMINI theo link ảnh (${geminiReport.size} ảnh)`);
+  for (const [url, blocks] of geminiReport) {
+    console.groupCollapsed(`${url} — ${blocks.length} khối`);
+    console.log(url);
+    console.log(blocks.map((b) => ({
+      original: b.original,
+      translated: b.translated,
+      bubble_box: b.bubble_box,
+      text_box: b.text_box,
+      shape: b.shape,
+      font_size: b.font_size,
+      lines: b.lines,
+      vertical: b.vertical,
+      _piece: b._piece,
+    })));
+    console.groupEnd();
+  }
   console.groupEnd();
   notify(tabId, { type: 'SHOW_INFO', text: `Đã dịch ${ok}/${list.length} ảnh.` });
 }
@@ -822,20 +875,19 @@ function findCutRow(img, W, lo, hi, target) {
   return best;
 }
 
-async function imageTiles(blob, mime) {
+// Cắt một ảnh thành các đoạn JPEG. Chỉ giữ các đoạn đã nén; bản pixel của cả ảnh được giải phóng ngay sau khi cắt.
+async function cutToTiles(blob, mime) {
   const bitmap = await createImageBitmap(blob);
   const W = bitmap.width;
   const H = bitmap.height;
-  const fullCanvas = new OffscreenCanvas(W, H);
-  const fullCtx = fullCanvas.getContext('2d', { willReadFrequently: true });
-  fullCtx.drawImage(bitmap, 0, 0);
-
   if (!SPLIT_TALL_IMAGES || H <= TALL_LIMIT) {
     bitmap.close();
-    return { W, H, fullCtx, tiles: [{ blob, mime, y0: 0, h: H }] };
+    return { W, H, tiles: [{ blob, mime, y0: 0, h: H }] };
   }
-
-  const img = fullCtx.getImageData(0, 0, W, H).data;
+  const full = new OffscreenCanvas(W, H);
+  full.getContext('2d', { willReadFrequently: true }).drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const img = full.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
   // Số đoạn: cứ mỗi TILE_MAX px thì thêm một đoạn (mỗi đoạn luôn <= TILE_MAX)
   const n = Math.floor(H / TILE_MAX) + 1;
   const cuts = [0];
@@ -853,27 +905,25 @@ async function imageTiles(blob, mime) {
     const y0 = cuts[i];
     const h = cuts[i + 1] - y0;
     const c = new OffscreenCanvas(W, h);
-    c.getContext('2d').drawImage(bitmap, 0, y0, W, h, 0, 0, W, h);
+    c.getContext('2d').drawImage(full, 0, y0, W, h, 0, 0, W, h);
     const tb = await c.convertToBlob({ type: 'image/jpeg', quality: 0.92 });
     tiles.push({ blob: tb, mime: 'image/jpeg', y0, h });
   }
-  bitmap.close();
-  return { W, H, fullCtx, tiles };
+  return { W, H, tiles };
 }
 
-// Đổi khung trong một đoạn về toạ độ ảnh gốc
-function itemsFromTileBlocks(blocks, tile, W, fullCtx) {
-  const H = fullCtx.canvas.height;
-  const data = fullCtx.getImageData(0, 0, W, H).data;
-  const { dx, dy } = boxDenominators(blocks);
-  const tileBottom = tile.y0 + tile.h;
+// Đổi khung của một đoạn về toạ độ ảnh gốc. Chỉ đọc pixel của đúng đoạn đó, không cần cả ảnh.
+async function itemsFromTileLocal(blocks, tile, W) {
+  if (!blocks.length) return [];
+  const bmp = await createImageBitmap(tile.blob);
+  const H = tile.h;
+  const c = new OffscreenCanvas(W, H);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bmp, 0, 0);
+  bmp.close();
+  const data = ctx.getImageData(0, 0, W, H).data;
+  const toRect = (nb) => ({ x0: (nb[1] / 1000) * W, y0: (nb[0] / 1000) * H, x1: (nb[3] / 1000) * W, y1: (nb[2] / 1000) * H });
   const items = [];
-  const toRect = (nb) => ({
-    x0: Math.max(0, (nb[1] / dx) * W),
-    x1: Math.min(W, (nb[3] / dx) * W),
-    y0: Math.max(tile.y0, tile.y0 + (nb[0] / dy) * tile.h),
-    y1: Math.min(tileBottom, tile.y0 + (nb[2] / dy) * tile.h),
-  });
   for (const b of blocks) {
     if (!b || !b.translated) continue;
     const { textNb, bubbleNb } = blockBoxes(b);
@@ -883,12 +933,23 @@ function itemsFromTileBlocks(blocks, tile, W, fullCtx) {
     }
     const raw = toRect(textNb);
     if (raw.x1 - raw.x0 < 4 || raw.y1 - raw.y0 < 4) {
-      console.warn('[OCR] bỏ khối: text_box nhỏ hơn 4px', { original: b.original, raw, W, H });
+      console.warn('[OCR] bỏ khối: khung chữ quá nhỏ', { original: b.original, raw });
       continue;
     }
-    // Khung không được vượt ra khỏi đoạn đang xử lý (tránh lấy nhầm chữ của đoạn kề bên)
-    const it = buildItem(b, raw, bubbleNb ? toRect(bubbleNb) : null, data, W, H, { y0: tile.y0, y1: tileBottom });
-    if (it) items.push(it);
+    const it = buildItem(b, raw, bubbleNb ? toRect(bubbleNb) : null, data, W, H, { y0: 0, y1: H }, false);
+    if (!it) {
+      console.warn('[OCR] bỏ khối: buildItem không tạo khung', { original: b.original, raw, bubble: bubbleNb });
+      continue;
+    }
+    items.push(it);
+  }
+  console.log(`[TILE] đoạn ${tile.y0}..${tile.y0 + H}: ${blocks.length} khối -> vẽ ${items.length}`);
+  // Đổi từ toạ độ trong đoạn sang toạ độ ảnh gốc
+  for (const it of items) {
+    it.box.y0 += tile.y0;
+    it.box.y1 += tile.y0;
+    it.raw.y0 += tile.y0;
+    it.raw.y1 += tile.y0;
   }
   return items;
 }
@@ -910,12 +971,14 @@ function dedupeItems(items) {
 }
 
 // Gửi nhiều đoạn của cùng một ảnh trong một yêu cầu, mỗi đoạn có nhãn thứ tự
-// Gửi nhiều đoạn của MỘT ảnh trong một yêu cầu. Nhãn đoạn: "Image <ảnh>_<đoạn>" (vd "Image 0_0", "Image 0_1").
-// Trả về mảng blocks theo thứ tự đoạn; đoạn nào model không trả về thì là null (để gửi lại riêng).
-async function callGeminiPieces(apiKey, pieces, targetLang, imageNo = 0) {
+// Gửi nhiều đoạn (của một hoặc nhiều ảnh) trong một yêu cầu. Nhãn mỗi đoạn: "k_i":
+// k là số thứ tự ảnh trong lô, i là thứ tự đoạn trong ảnh đó (từ trên xuống). Trả về Map nhãn -> blocks;
+// nhãn nào model không trả về thì không có trong Map (để gửi lại riêng).
+async function callGeminiPieces(apiKey, pieces, targetLang) {
   const target = TARGET_NAMES[targetLang] || targetLang;
-  const prompt = `You are given several consecutive vertical pieces of ONE tall comic/manga page, labeled "Image ${imageNo}_0", "Image ${imageNo}_1", ... from top to bottom (the number after _ is the piece order). The pieces are cut at blank gutters between panels, so no text block is split across two pieces.
-For each piece, find every block of readable text in THAT piece. Merge lines that belong to the same sentence or bubble into one block.
+  const labels = pieces.map((p) => p.label);
+  const prompt = `You are given several vertical pieces of one or more tall comic/manga pages. Each piece is labeled "Image k_i": k identifies the page, i is the order of the piece within that page, from top to bottom. The pieces of the same page are consecutive in this request. The pieces are cut at blank gutters between panels, so no text block is split across two pieces. Pieces of different pages are unrelated: NEVER move a block from one page to another.
+For each piece, find every block of readable text in THAT piece only. Merge lines that belong to the same sentence or bubble into one block.
 For each block return:
 - "original": the exact text as written, in its original language, with line breaks replaced by spaces.
 - "translated": a natural translation into ${target}.
@@ -928,64 +991,137 @@ For each block return:
 - "shape": "ellipse" only if the bubble is round, oval, cloud-like or spiky; "rect" for rectangular/square boxes and for text with no bubble.
 - "lines": the number of text lines of the ORIGINAL block as printed (count columns if the text is vertical).
 - "vertical": true if the original text runs top-to-bottom in columns, otherwise false.
-- "font_size": the em size of the original text (height of one character line) in the same 0-1000 units as the image height. For example, on an image 1000 px tall, text with 25 px characters is 25. Estimate from the glyph size, not the bubble.
-Only translate dialogue, narration and caption text. SKIP all sound effects and onomatopoeia (stylized or hand-lettered words for noises, ambient sounds, heartbeats, whispering, footsteps, impacts, laughter or crying sounds, etc., e.g. "ドキドキ", "ざわざわ", "BAM", "thump", "bisbis"), as well as isolated interjections or mimetic words that only describe the scene rather than being spoken or narrated. Do not return a block for them at all. Never mix blocks between pieces.
-Return ONLY JSON in this form: {"images":[{"index":"${imageNo}_0","summary":"...","blocks":[{"original":"...","translated":"...","bubble_box":[0,0,0,0],"text_box":[0,0,0,0],"shape":"ellipse","lines":1,"font_size":30,"vertical":false}]}]}
-Use the same index string as the piece label ("${imageNo}_0", "${imageNo}_1", ...). Return exactly one entry per label, in the same order, and never skip a label.
-In "summary", write 3-8 words describing what THAT specific piece shows (e.g. "woman at a desk, no text"), BEFORE listing its blocks. This keeps every block attached to the right image.
-Many consecutive images may contain no text at all (just artwork or empty space): that is normal. Return an empty "blocks" array for them. NEVER move text from one image to another to fill a gap, and never shift blocks to the previous or next image. A block belongs only to the image where its text is actually printed, and its boxes are relative to that image.`;
+- "font_size": the em size of the original text (height of one character line) in the same 0-1000 units as the piece height. For example, on a piece 1000 px tall, text with 25 px characters is 25. Estimate from the glyph size, not the bubble.
+Only translate dialogue, narration and caption text. SKIP all sound effects and onomatopoeia (stylized or hand-lettered words for noises, ambient sounds, heartbeats, whispering, footsteps, impacts, laughter or crying sounds, etc., e.g. "ドキドキ", "ざわざわ", "BAM", "thump", "bisbis"), as well as isolated interjections or mimetic words that only describe the scene rather than being spoken or narrated. Do not return a block for them at all.
+Return ONLY JSON in this form: {"images":[{"index":"0_0","summary":"...","blocks":[{"original":"...","translated":"...","bubble_box":[0,0,0,0],"text_box":[0,0,0,0],"shape":"ellipse","lines":1,"font_size":30,"vertical":false}]}]}
+Use the same index string as the piece label. Return exactly one entry per label, in the same order, and never skip a label.
+In "summary", write 3-8 words describing what THAT specific piece shows (e.g. "woman at a desk, no text"), BEFORE listing its blocks.
+Many pieces may contain no text at all (just artwork or empty space): that is normal. Return an empty "blocks" array for them. NEVER move text from one piece to another to fill a gap. A block belongs only to the piece where its text is actually printed, and its boxes are relative to that piece.`;
 
-  const reminder = `\n\nThis request contains exactly ${pieces.length} pieces of one image, labeled "Image ${imageNo}_0" to "Image ${imageNo}_${pieces.length - 1}". The "images" array MUST have exactly ${pieces.length} entries, one for EVERY index from "${imageNo}_0" to "${imageNo}_${pieces.length - 1}". A piece with no text STILL gets its own entry with an empty array. Never omit an entry.`;
+  const reminder = `\n\nThis request contains exactly ${pieces.length} pieces, with these labels: ${labels.map((l) => '"' + l + '"').join(', ')}. The "images" array MUST have exactly ${pieces.length} entries, one for EVERY label listed. A piece with no text STILL gets its own entry with an empty array. Never omit an entry.`;
   const parts = [{ text: prompt + reminder }];
-  pieces.forEach((p, i) => {
-    parts.push({ text: `Image ${imageNo}_${i}:` });
+  for (const p of pieces) {
+    parts.push({ text: `Image ${p.label}:` });
     parts.push({ inline_data: { mime_type: p.mime, data: p.base64 } });
-  });
+  }
   const body = JSON.stringify({
     contents: [{ parts }],
     generationConfig: { responseMimeType: 'application/json', temperature: 0 },
   });
   const result = await geminiRotate(apiKey, body, parseJsonText);
-  // Ghép theo nhãn "imageNo_i"; nhãn thiếu thì null
   const list = Array.isArray(result.images) ? result.images : [];
   const byLabel = new Map();
   for (const e of list) {
     if (e && e.index !== undefined) byLabel.set(String(e.index).trim(), e.blocks || []);
   }
-  return pieces.map((_, i) => (byLabel.has(`${imageNo}_${i}`) ? byLabel.get(`${imageNo}_${i}`) : null));
+  const out = new Map();
+  for (const l of labels) if (byLabel.has(l)) out.set(l, byLabel.get(l));
+  return out;
 }
 
-// Một ảnh (có thể gồm nhiều đoạn) -> items để phủ lên trang
-async function geminiImageItems(blob, mime, apiKey, targetLang) {
-  const { W, H, fullCtx, tiles } = await imageTiles(blob, mime);
-  let all = [];
+// Xử lý nhiều ảnh dài: cắt từng ảnh rồi xếp các đoạn vào hàng chờ. Đủ TALL_BATCH_PIECES đoạn thì gửi một yêu cầu,
+// phần dư giữ lại để ghép với ảnh kế tiếp. Khi tất cả đoạn của một ảnh đã xong thì gọi onDone(kết quả của ảnh đó)
+// ngay, không đợi các ảnh khác. Trả về [{ img, items, width, height, error }] theo đúng thứ tự imgs.
+const TALL_BATCH_PIECES = 8; // mỗi request gom tối đa 8 đoạn ảnh dài
+async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
+  // gi = số thứ tự ảnh trong cả lượt dịch; nhãn đoạn là gi_i nên cùng một đoạn luôn có cùng nhãn ở mọi lô
+  const recs = imgs.map((img, gi) => ({ img, gi, W: 0, H: 0, tiles: [], all: [], raw: [], error: null, pending: 0, result: null }));
+  const queue = []; // [{ rec, i }] các đoạn đang chờ gửi
 
-  if (tiles.length === 1) {
-    const base64 = bytesToBase64(new Uint8Array(await tiles[0].blob.arrayBuffer()));
-    const blocks = await callGemini(apiKey, base64, tiles[0].mime, targetLang);
-    all = itemsFromTileBlocks(blocks, tiles[0], W, fullCtx);
-  } else {
-    // Gộp các đoạn của ảnh trong một yêu cầu, nhãn "Image 0_0", "Image 0_1", ...
-    const pieces = [];
-    for (const t of tiles) {
-      pieces.push({ mime: t.mime, base64: bytesToBase64(new Uint8Array(await t.blob.arrayBuffer())) });
+  // Ảnh đã xong hết đoạn: gom kết quả, gọi onDone để vẽ ngay
+  const finishRec = async (rec) => {
+    if (rec.result) return;
+    if (rec.error) {
+      rec.result = { img: rec.img, items: [], width: rec.W, height: rec.H, error: rec.error };
+    } else {
+      const items = dedupeItems(rec.all);
+      avoidOverlap(items);
+      rec.result = { img: rec.img, items, width: rec.W, height: rec.H, error: null };
     }
-    const perPiece = await callGeminiPieces(apiKey, pieces, targetLang, 0);
-    // Đoạn nào không có trong kết quả gộp thì gửi riêng đoạn đó
-    for (let i = 0; i < tiles.length; i++) {
-      if (perPiece[i] === null) {
-        console.warn(`[TILE] đoạn ${i} thiếu trong kết quả gộp, gửi riêng`);
-        perPiece[i] = await callGemini(apiKey, pieces[i].base64, pieces[i].mime, targetLang);
+    geminiReport.set(rec.img.srcUrl, rec.raw);
+    rec.all = [];
+    if (onDone) await onDone(rec.result);
+  };
+
+  // Gửi một lô đoạn trong một yêu cầu; đoạn nào model không trả về thì gửi lại riêng
+  const flush = async (batch) => {
+    const live = batch.filter((p) => !p.rec.error);
+    if (live.length) {
+      try {
+        const pieces = [];
+        for (const p of live) {
+          const tile = p.rec.tiles[p.i];
+          pieces.push({
+            label: `${p.rec.gi}_${p.i}`,
+            rec: p.rec,
+            tile,
+            mime: tile.mime,
+            base64: bytesToBase64(new Uint8Array(await tile.blob.arrayBuffer())),
+          });
+        }
+        const byLabel = await callGeminiPieces(apiKey, pieces, targetLang);
+        const asked = pieces.map((pc) => pc.label);
+        const got = [...byLabel.keys()];
+        console.log(`[TILE] lô: gửi ${asked.join(' ')} | nhận ${got.join(' ') || '(không có)'}`);
+        for (const pc of pieces) {
+          let blocks = byLabel.get(pc.label);
+          if (!blocks) {
+            console.warn(`[TILE] đoạn ${pc.label} thiếu trong kết quả gộp, gửi riêng`);
+            blocks = await callGemini(apiKey, pc.base64, pc.mime, targetLang);
+          }
+          pc.rec.raw.push(...blocks.map((b) => ({ ...b, _piece: pc.label })));
+          pc.rec.all = pc.rec.all.concat(await itemsFromTileLocal(blocks, pc.tile, pc.rec.W));
+        }
+      } catch (err) {
+        console.error('[OCR] lô ảnh dài lỗi', err);
+        for (const p of live) p.rec.error = err;
       }
     }
-    tiles.forEach((t, i) => {
-      all = all.concat(itemsFromTileBlocks(perPiece[i] || [], t, W, fullCtx));
-    });
-  }
+    // Giải phóng dữ liệu đoạn đã xử lý, rồi đếm và vẽ các ảnh đã xong
+    for (const p of batch) p.rec.tiles[p.i].blob = null;
+    for (const p of batch) {
+      p.rec.pending--;
+      if (p.rec.pending === 0) await finishRec(p.rec);
+    }
+  };
 
-  const items = dedupeItems(all);
-  avoidOverlap(items);
-  return { items, width: W, height: H };
+  for (const rec of recs) {
+    try {
+      const t = await cutToTiles(rec.img.blob, rec.img.mime);
+      rec.W = t.W;
+      rec.H = t.H;
+      rec.tiles = t.tiles;
+      rec.pending = rec.tiles.length;
+    } catch (err) {
+      rec.error = err;
+      await finishRec(rec);
+      continue;
+    }
+    const n = rec.tiles.length;
+    const piecesOf = (r) => r.tiles.map((_, i) => ({ rec: r, i }));
+    if (n > TALL_BATCH_PIECES) {
+      // Ảnh tự dài hơn một request: gửi hết hàng chờ trước, rồi chia ảnh này thành các request đầy đủ
+      if (queue.length) await flush(queue.splice(0));
+      const all = piecesOf(rec);
+      for (let k = 0; k < all.length; k += TALL_BATCH_PIECES) await flush(all.slice(k, k + TALL_BATCH_PIECES));
+      continue;
+    }
+    // Ảnh vừa một request: nếu thêm nó vào sẽ vượt giới hạn thì gửi hàng chờ trước, để không tách ảnh này
+    if (queue.length && queue.length + n > TALL_BATCH_PIECES) await flush(queue.splice(0));
+    queue.push(...piecesOf(rec));
+    if (queue.length === TALL_BATCH_PIECES) await flush(queue.splice(0));
+  }
+  if (queue.length) await flush(queue.splice(0));
+
+  for (const rec of recs) await finishRec(rec); // phòng trường hợp còn sót
+  return recs.map((rec) => rec.result);
+}
+
+// Một ảnh (dùng cho chuột phải) -> items để phủ lên trang
+async function geminiImageItems(blob, mime, apiKey, targetLang) {
+  const [r] = await geminiTallBatch([{ blob, mime }], apiKey, targetLang);
+  if (r.error) throw r.error;
+  return { items: r.items, width: r.width, height: r.height };
 }
 
 // Ảnh chuột phải: Gemini trả về khung, đổi sang toạ độ pixel rồi lấy màu nền
@@ -1068,6 +1204,14 @@ async function translateAll(tabId, urls) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'GET_NOTEXT' && sender.tab) {
+    // Content script khi tải trang: trả về các ảnh không có chữ của tab đó
+    chrome.storage.session.get('noText').then(
+      (store) => sendResponse({ urls: ((store.noText || {})[sender.tab.id]) || [] }),
+      () => sendResponse({ urls: [] })
+    );
+    return true;
+  }
   if (msg.type === 'TRANSLATE_ONE' && sender.tab) {
     // Nút "Dịch ảnh" trên từng ảnh: dịch đúng ảnh đó, báo kết quả về để nút đổi trạng thái
     runImageViewer(sender.tab.id, msg.srcUrl, true).then(
@@ -1104,6 +1248,8 @@ async function markState(tabId, key, url) {
     set.add(url);
     map[tabId] = [...set];
     await chrome.storage.session.set({ [key]: map });
+    // Báo về trang để nút dịch trên ảnh đó được ẩn ngay
+    if (key === 'noText') notify(tabId, { type: 'NOTEXT', srcUrl: url });
   } catch (err) {
     console.warn(`[${key}] không lưu được`, err.message);
   }
