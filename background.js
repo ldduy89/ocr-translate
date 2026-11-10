@@ -1340,11 +1340,13 @@ const cancelFlags = new Map(); // tabId -> true khi người dùng bấm hủy
 let cancelCheck = () => false;
 
 async function translateAll(tabId, urls) {
-  const list = [...new Set(urls)];
+  let list = [...new Set(urls)];
   if (!list.length) {
     notify(tabId, { type: 'SHOW_ERROR', error: 'Không tìm thấy ảnh đủ lớn trên trang.' });
     return;
   }
+  const requestedCount = list.length;
+  let skippedCount = 0; // số ảnh bị bỏ vì không đủ lượt
   // Trừ lượt theo số ảnh được chọn; ảnh không dịch được (lỗi, không có chữ) sẽ được hoàn lại ở cuối.
   // Đặt trạng thái "đang chạy" trước để side panel luôn nhận được lúc kết thúc, kể cả khi trừ lượt thất bại.
   await setJob(tabId, 'running');
@@ -1356,6 +1358,14 @@ async function translateAll(tabId, urls) {
   cancelCheck = () => cancelFlags.get(tabId) === true;
   try {
     try {
+      // Không đủ lượt cho cả lượt dịch: vẫn dịch số ảnh đầu danh sách (từ trên xuống) bằng đúng số lượt còn lại,
+      // xong thì báo hết lượt. Hết sạch lượt thì Account.require ném lỗi "hết lượt" như cũ.
+      const acc = await Account.require();
+      const have = Math.floor(Number(acc.user.credits) || 0);
+      if (have < list.length) {
+        skippedCount = list.length - have;
+        list = list.slice(0, have);
+      }
       for (let i = 0; i < list.length; i += CHARGE_MAX) {
         const count = Math.min(CHARGE_MAX, list.length - i);
         const ref = await Account.charge(count);
@@ -1370,6 +1380,7 @@ async function translateAll(tabId, urls) {
     }
     await translateAllGemini(tabId, list, stats);
   } finally {
+    const wasCancelled = cancelCheck(); // đọc trước khi xoá cờ hủy bên dưới
     // Hoàn lượt cho ảnh không dịch được, theo thứ tự các lần trừ
     let toRefund = list.length - stats.drawn;
     for (const r of refs) {
@@ -1379,8 +1390,38 @@ async function translateAll(tabId, urls) {
     }
     cancelFlags.delete(tabId);
     notify(tabId, { type: 'QUEUE_CLEAR' }); // hết lượt: các ảnh còn trong hàng chờ không còn bị khoá
+    if (skippedCount > 0 && !wasCancelled) {
+      notify(tabId, {
+        type: 'SHOW_ERROR',
+        error: `Bạn đã hết lượt dịch. Đã dịch ${stats.drawn}/${requestedCount} ảnh, còn ${skippedCount} ảnh chưa dịch. Vui lòng mua thêm lượt để tiếp tục.`,
+      });
+    }
     await setJob(tabId, 'idle');
   }
+}
+
+// Side panel nào đang mở ở cửa sổ nào (popup.js nối cổng 'sidepanel:<windowId>' khi mở)
+const panelPorts = new Map(); // windowId -> Set<Port>
+chrome.runtime.onConnect.addListener((port) => {
+  const m = /^sidepanel:(\d+)$/.exec(port.name || '');
+  if (!m) return;
+  const id = Number(m[1]);
+  if (!panelPorts.has(id)) panelPorts.set(id, new Set());
+  panelPorts.get(id).add(port);
+  broadcastPanelState(id, true);
+  port.onDisconnect.addListener(() => {
+    const set = panelPorts.get(id);
+    if (!set) return;
+    set.delete(port);
+    if (!set.size) { panelPorts.delete(id); broadcastPanelState(id, false); }
+  });
+});
+
+// Báo mọi tab trong cửa sổ để nút nổi giữ trạng thái "đang mở" khi side panel mở
+function broadcastPanelState(winId, open) {
+  chrome.tabs.query({ windowId: winId }).then((tabs) => {
+    for (const t of tabs) chrome.tabs.sendMessage(t.id, { type: 'PANEL_STATE', open }).catch(() => {});
+  }).catch(() => {});
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -1399,6 +1440,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       () => sendResponse({ ok: false })
     );
     return true;
+  }
+  if (msg.type === 'GET_PANEL_STATE' && sender.tab) {
+    const set = panelPorts.get(sender.tab.windowId);
+    sendResponse({ open: !!(set && set.size) });
+    return false;
+  }
+  if (msg.type === 'TOGGLE_SIDE_PANEL' && sender.tab) {
+    // Nút nổi bên phải trang: đang mở thì đóng, đang đóng thì mở (giống icon trên thanh công cụ).
+    // sidePanel.open phải gọi ngay (đồng bộ) trong handler để còn trong cử chỉ bấm của người dùng.
+    const winId = sender.tab.windowId;
+    const ports = panelPorts.get(winId);
+    if (ports && ports.size) {
+      if (typeof chrome.sidePanel.close === 'function') {
+        chrome.sidePanel.close({ windowId: winId }).catch(() => {});
+      } else {
+        for (const p of ports) { try { p.postMessage({ type: 'CLOSE_PANEL' }); } catch (_) {} }
+      }
+    } else {
+      chrome.sidePanel.open({ tabId: sender.tab.id }).catch((err) => console.warn('[sidePanel.open]', err.message));
+    }
+    return false;
   }
   if (msg.type === 'REBIND_URL' && sender.tab) {
     // Trang đổi link ảnh đã dịch: đổi khoá URL ở trạng thái "Đã dịch" để side panel khớp ảnh mới

@@ -27,6 +27,7 @@
         break;
       }
       case 'SCROLL_TO_IMAGE': scrollToImage(msg.url); break;
+      case 'PANEL_STATE':     setDockOpen(msg.open); break;
       case 'NOTEXT':          markNoText(msg.srcUrl); break;
       case 'MENU_TRANSLATE':  sendResponse({ handled: translateFromMenu(msg.srcUrl) }); break;
       case 'FETCH_BLOB':
@@ -36,7 +37,7 @@
   });
 
   // ---------- Theo dõi thay đổi ảnh trên trang -> báo side panel làm mới danh sách ----------
-  const OWN_SELECTOR = '#ocr-pill-host, .ocr-img-overlay, #ocr-panel, #ocr-toast';
+  const OWN_SELECTOR = '#ocr-pill-host, #ocr-dock-host, .ocr-img-overlay, #ocr-panel, #ocr-toast';
   function isOwnNode(n) {
     const el = n && n.nodeType === 1 ? n : (n && n.parentElement);
     return !!(el && el.closest && el.closest(OWN_SELECTOR));
@@ -1053,6 +1054,83 @@
       }
     });
   } catch (_) {}
+
+  // ================= Nút nổi bên phải, canh giữa theo chiều dọc =================
+  // Bấm: mở side panel (danh sách ảnh) như icon trên thanh công cụ; bấm lần nữa thì đóng.
+  // Tắt được bằng: chrome.storage.sync { showSideButton: false }
+  const DOCK_CSS = `
+    .dock{position:fixed;right:0;top:50%;width:46px;height:48px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;
+      padding:0 10px 0 6px;border:0;outline:0;border-radius:12px 0 0 12px;background:#fff;
+      box-shadow:-2px 2px 10px rgba(0,0,0,.28);cursor:pointer;pointer-events:auto;
+      transform:translate(8px,-50%);opacity:.92;
+      transition:transform .18s ease,opacity .18s ease,box-shadow .15s,background .15s}
+    .dock:hover,.dock.open{transform:translate(0,-50%);opacity:1;box-shadow:-3px 3px 14px rgba(0,0,0,.4)}
+    .dock:active{background:#eef3fb}
+    .dock:focus{outline:0}
+    .dock img,.dock svg{width:28px;height:28px;border-radius:7px;display:block;flex:none}`;
+  let dockHost = null;
+  let dockBtn = null;
+  let dockEnabled = true;
+  let panelOpen = false; // side panel đang mở: nút giữ nguyên vị trí như khi hover
+
+  function setDockOpen(on) {
+    panelOpen = !!on;
+    if (dockBtn) dockBtn.classList.toggle('open', panelOpen);
+  }
+
+  function ensureDock() {
+    if (dockHost && dockHost.isConnected) return;
+    dockHost = document.createElement('div');
+    dockHost.id = 'ocr-dock-host';
+    dockHost.style.cssText = 'all:initial;position:fixed;top:0;left:0;width:0;height:0;z-index:2147483644;';
+    const root = dockHost.attachShadow({ mode: 'closed' });
+    const st = document.createElement('style');
+    st.textContent = DOCK_CSS;
+    root.appendChild(st);
+
+    const btn = document.createElement('button');
+    btn.className = 'dock';
+    btn.type = 'button';
+    btn.title = 'Mở / đóng danh sách ảnh';
+    const im = document.createElement('img');
+    try { im.src = chrome.runtime.getURL('icons/icon48.png'); } catch (_) {}
+    im.onerror = () => { im.remove(); btn.insertAdjacentHTML('afterbegin', ICON_SVG.replace('width="24" height="24"', 'width="28" height="28"')); };
+    btn.appendChild(im);
+    // Không cho sự kiện lọt xuống trang
+    for (const t of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'dblclick', 'contextmenu']) {
+      btn.addEventListener(t, (e) => e.stopPropagation());
+    }
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      try { chrome.runtime.sendMessage({ type: 'TOGGLE_SIDE_PANEL' }).catch(() => {}); } catch (_) {}
+    });
+    root.appendChild(btn);
+    dockBtn = btn;
+    btn.classList.toggle('open', panelOpen);
+    (document.body || document.documentElement).appendChild(dockHost);
+    try {
+      chrome.runtime.sendMessage({ type: 'GET_PANEL_STATE' }).then((r) => setDockOpen(r && r.open)).catch(() => {});
+    } catch (_) {}
+  }
+
+  function updateDock() {
+    if (dockEnabled) ensureDock();
+    else if (dockHost) { dockHost.remove(); dockHost = null; dockBtn = null; }
+  }
+
+  try {
+    chrome.storage.sync.get({ showSideButton: true }).then((s) => {
+      dockEnabled = s.showSideButton !== false;
+      updateDock();
+    });
+    chrome.storage.onChanged.addListener((ch) => {
+      if (ch.showSideButton) {
+        dockEnabled = ch.showSideButton.newValue !== false;
+        updateDock();
+      }
+    });
+  } catch (_) { updateDock(); }
 
   function removePanel() {
     panel?.remove();

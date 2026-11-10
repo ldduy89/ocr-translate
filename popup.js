@@ -1,3 +1,16 @@
+// Báo cho background biết side panel đang mở (theo cửa sổ) để nút nổi trên trang bật/tắt được.
+// Đóng panel thì cổng tự ngắt. Nếu service worker bị ngủ làm ngắt cổng thì nối lại.
+(async () => {
+  let winId;
+  try { winId = (await chrome.windows.getCurrent()).id; } catch (_) { return; }
+  const connect = () => {
+    const port = chrome.runtime.connect({ name: 'sidepanel:' + winId });
+    port.onMessage.addListener((m) => { if (m && m.type === 'CLOSE_PANEL') window.close(); });
+    port.onDisconnect.addListener(() => setTimeout(connect, 300));
+  };
+  connect();
+})();
+
 // Ngôn ngữ đích cho bước dịch: [mã, tên hiển thị]. Tên gửi cho Gemini nằm trong background.js (TARGET_NAMES).
 const TARGET_OPTIONS = [
   ["vi", "Tiếng Việt"],
