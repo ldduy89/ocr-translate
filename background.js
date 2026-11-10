@@ -145,9 +145,24 @@ async function getSavedModelIndex() {
 }
 
 // Gọi một mô hình một lần; lỗi sẽ được ném ra để chuyển sang mô hình khác
+// Mỗi request tối đa 60 giây; quá thời gian thì bỏ và chuyển sang mô hình khác (geminiRotate)
+const GEMINI_TIMEOUT_MS = 60000;
 async function requestGemini(apiKey, model, body) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
-  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      throw new Error(`${model}: quá ${GEMINI_TIMEOUT_MS / 1000} giây, chuyển mô hình khác`);
+    }
+    throw err;
+  }
   if (!res.ok) {
     const detail = (await res.text()).slice(0, 150);
     throw new Error(`${model}: HTTP ${res.status} ${detail}`);
@@ -333,6 +348,113 @@ function avoidOverlap(items) {
   }
 }
 
+// Khi hai khối đè nhau (bubble với chữ gốc, bubble với bubble, sub với sub): co cả hai khối về SHRINK_SCALE quanh tâm.
+// Không dời khối, không cắt bubble.
+// Tỉ lệ co khi hai khối đè nhau (mặc định 90% kích thước gốc, chỉnh tại đây để test)
+const SHRINK_SCALE = 0.9;
+// Đè nhau ít (dưới OVERLAP_TOL phần diện tích của khung nhỏ hơn) thì chấp nhận, không co
+const OVERLAP_TOL = 0.15;
+// Đè nhau trên mức này (bubble↔bubble hoặc sub↔sub) thì gộp hai khối thành một
+const MERGE_TOL = 0.7;
+function mergeItems(a, c) {
+  const u = (p, q) => ({ x0: Math.min(p.x0, q.x0), y0: Math.min(p.y0, q.y0), x1: Math.max(p.x1, q.x1), y1: Math.max(p.y1, q.y1) });
+  a.original = `${a.original || ''} ${c.original || ''}`.trim();
+  a.translated = `${a.translated || ''} ${c.translated || ''}`.trim();
+  a.box = u(a.box, c.box);
+  if (a.raw && c.raw) a.raw = u(a.raw, c.raw);
+  if (a.bubbleRect && c.bubbleRect) a.bubbleRect = u(a.bubbleRect, c.bubbleRect);
+  else a.bubbleRect = a.bubbleRect || c.bubbleRect || null;
+  if (a.inkBox && c.inkBox) a.inkBox = u(a.inkBox, c.inkBox);
+  if (a.fontPx != null && c.fontPx != null) a.fontPx = Math.min(a.fontPx, c.fontPx);
+  a.merged = true;
+  // Trạng thái co được tính lại từ khung mới
+  a._s = 1;
+  a._x0 = { ...a.box };
+  a._b0 = a.bubbleRect ? { ...a.bubbleRect } : null;
+  delete a._origBubble;
+  delete a._shrunk;
+}
+const area = (r) => (r.x1 - r.x0) * (r.y1 - r.y0);
+function nudgeOverlaps(items, W, H) {
+  const hits = (A, B) =>
+    Math.min(A.x1, B.x1) - Math.max(A.x0, B.x0) > 0 && Math.min(A.y1, B.y1) - Math.max(A.y0, B.y0) > 0;
+  const bub = (it) => it.bubbleRect || it.box;
+  const txt = (it) => it.raw || it.box;
+  // Tỉ lệ diện tích đè / diện tích khung nhỏ hơn
+  const overlapRatio = (A, B) => {
+    const w = Math.min(A.x1, B.x1) - Math.max(A.x0, B.x0);
+    const h = Math.min(A.y1, B.y1) - Math.max(A.y0, B.y0);
+    if (w <= 0 || h <= 0) return 0;
+    return (w * h) / Math.max(1e-6, Math.min(area(A), area(B)));
+  };
+  const sig = (A, B) => overlapRatio(A, B) > OVERLAP_TOL;
+  const conflicts = (x, y) =>
+    sig(bub(x), txt(y)) || sig(bub(y), txt(x)) || sig(bub(x), bub(y)) || sig(x.box, y.box);
+  const center = (r) => ({ x: (r.x0 + r.x1) / 2, y: (r.y0 + r.y1) / 2 });
+  const scaleRect = (r, f) => {
+    const c = center(r);
+    return { x0: c.x - (c.x - r.x0) * f, x1: c.x + (r.x1 - c.x) * f, y0: c.y - (c.y - r.y0) * f, y1: c.y + (r.y1 - c.y) * f };
+  };
+  for (const it of items) {
+    if (it._s == null) it._s = 1;
+    if (it.bubbleRect && !it._b0) it._b0 = { ...it.bubbleRect };
+    if (it.box && !it._x0) it._x0 = { ...it.box };
+  }
+  const setScale = (it, f) => {
+    if (it._b0 && it.bubbleRect) it.bubbleRect = scaleRect(it._b0, f);
+    if (it._x0 && it.box) it.box = scaleRect(it._x0, f);
+    it._s = f;
+  };
+  for (let pass = 0; pass < 6; pass++) {
+    let changed = false;
+    for (let i = 0; i < items.length; i++) {
+      for (let j = i + 1; j < items.length; j++) {
+        const a = items[i], c = items[j];
+        if (!a.box || !c.box) continue;
+        if (Math.max(overlapRatio(bub(a), bub(c)), overlapRatio(a.box, c.box)) > MERGE_TOL) {
+          mergeItems(a, c);
+          items.splice(j, 1);
+          j--;
+          changed = true;
+          continue;
+        }
+        if (!conflicts(a, c)) continue;
+        for (const it of [a, c]) {
+          // Mỗi khối chỉ co một lần về SHRINK_SCALE so với gốc, không co dồn qua nhiều vòng
+          if (it._s > SHRINK_SCALE) { setScale(it, SHRINK_SCALE); changed = true; }
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  // Log các cặp đang đè nhau sau khi co: % đè từng loại và tỉ lệ co của mỗi khối
+  const rows = [];
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      const a = items[i], c = items[j];
+      if (!a.box || !c.box) continue;
+      const bt = Math.max(overlapRatio(bub(a), txt(c)), overlapRatio(bub(c), txt(a)));
+      const bb = overlapRatio(bub(a), bub(c));
+      const ss = overlapRatio(a.box, c.box);
+      const m = Math.max(bt, bb, ss);
+      if (m <= 0) continue;
+      rows.push({
+        A: String(a.original || '').slice(0, 18),
+        B: String(c.original || '').slice(0, 18),
+        'bubble↔chữ gốc %': Math.round(bt * 100),
+        'bubble↔bubble %': Math.round(bb * 100),
+        'sub↔sub %': Math.round(ss * 100),
+        'co A': a._s.toFixed(2),
+        'co B': c._s.toFixed(2),
+      });
+    }
+  }
+  if (rows.length) {
+    console.log(`[ĐÈ] ${rows.length} cặp đang đè nhau`);
+    console.table(rows);
+  }
+}
+
 // Dựng một item từ khối Gemini. raw = khung chữ; bubble = khung bong bóng (mép ngoài) nếu có.
 // Có khung bong bóng thì dùng luôn, không đoán thêm; thiếu hoặc vô lý thì quay về cách cũ (nới theo màu nền).
 function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
@@ -389,6 +511,7 @@ function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
     // font_size của Gemini tính theo chiều cao của đoạn ảnh đang gửi (khi cắt ảnh dài là đoạn, không phải cả ảnh)
     fontPx: fontPxFrom(b, clipY ? clipY.y1 - clipY.y0 : H),
     inkBox: ink ? { x0: ink.x0, y0: ink.y0, x1: ink.x1, y1: ink.y1 } : null,
+    bubbleRect: bubble ? { x0: bubble.x0, y0: bubble.y0, x1: bubble.x1, y1: bubble.y1 } : null,
   };
 }
 
@@ -454,6 +577,7 @@ function itemsFromBlocks(blocks, bitmap, strict) {
     if (it) items.push(it);
   }
   avoidOverlap(items);
+  nudgeOverlaps(items, W, H);
   return items;
 }
 
@@ -602,13 +726,13 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     try {
       let items = itemsFromBlocks(blocks, bitmap, round === EXTRA_ROUND); // chỉ kiểm tra chặt ở vòng cuối
       console.log(`[OCR] vòng ${round}: ${blocks.length} khối -> vẽ ${items.length}`, img.srcUrl);
-      if (items.length) {
+      if (items.length && !cancelCheck()) {
         notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width: bitmap.width, height: bitmap.height, items });
         ok++;
         progress();
         drawn.add(img.srcUrl);
         await markDone(tabId, img.srcUrl);
-      } else if (blocks.length) {
+      } else if (blocks.length && !cancelCheck()) {
         // Model có trả khối nhưng không khối nào vẽ được: ghi lại để xem trong log
         undrawn.push({ url: img.srcUrl, blocks: blocks.length, round });
         // Không vẽ được khối nào thì coi như không có chữ: bỏ chọn và khoá trong side panel
@@ -626,6 +750,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
   // nghỉ BATCH_PAUSE_MS rồi mới gửi nhóm kế.
   const askParallel = async (groups, hint, onResults) => {
     for (let k = 0; k < groups.length; k += PARALLEL_REQUESTS) {
+      if (cancelCheck()) break; // đã hủy: không gửi thêm request
       const part = groups.slice(k, k + PARALLEL_REQUESTS);
       const res = await Promise.all(part.map((g) =>
         askBatch(g, hint).then((perImage) => ({ g, perImage }), (err) => ({ g, err }))
@@ -720,7 +845,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
         tallErrors.push(img.srcUrl);
         console.error('[OCR] ảnh rất cao lỗi', img.srcUrl, r.error);
         notify(tabId, { type: 'SHOW_ERROR', error: r.error.message });
-      } else if (r.items.length) {
+      } else if (r.items.length && !cancelCheck()) {
         notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width: r.width, height: r.height, items: r.items });
         ok++;
         progress();
@@ -744,7 +869,10 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     ['ảnh rất cao: lỗi', notDrawn(tallErrors)],
     ['không tải được ảnh', list.filter((u) => !loadedUrls.has(u))],
   ];
-  for (const u of [...groups[1][1], ...groups[3][1], ...groups[4][1]]) await markState(tabId, 'noText', u);
+  // Đã hủy: ảnh chưa dịch không phải là ảnh không có chữ, không khoá chúng
+  if (!cancelCheck()) {
+    for (const u of [...groups[1][1], ...groups[3][1], ...groups[4][1]]) await markState(tabId, 'noText', u);
+  }
   const sumGroups = groups.reduce((n, [, urls]) => n + urls.length, 0);
   console.group(`[OCR] TỔNG KẾT: ${list.length} ảnh | đã vẽ ${drawn.size} | khác ${sumGroups}`);
   for (const [label, urls] of groups) {
@@ -972,28 +1100,12 @@ async function itemsFromTileLocal(blocks, tile, W) {
       it.inkBox.y0 += tile.y0;
       it.inkBox.y1 += tile.y0;
     }
+    if (it.bubbleRect) {
+      it.bubbleRect.y0 += tile.y0;
+      it.bubbleRect.y1 += tile.y0;
+    }
   }
   // Log độ lệch: chữ gốc (nét chữ thật) so với khung sub sẽ vẽ. dx/dy > 0 nghĩa là sub nằm bên phải/dưới chữ gốc.
-  const lechItems = items.filter((it) => !it.merged);
-  const skipped = items.filter((it) => it.merged).map((it) => String(it.original).slice(0, 30));
-  if (skipped.length) console.log(`[LECH] bỏ qua ${skipped.length} khối gộp nhiều bong bóng:`, skipped);
-  if (lechItems.length) {
-    console.log(`[LECH] đoạn y0=${tile.y0}, kích thước ${W}x${H}px`);
-    console.table(lechItems.map((it) => {
-      const bx = it.box, ib = it.inkBox;
-      const cx = (bx.x0 + bx.x1) / 2, cy = (bx.y0 + bx.y1) / 2;
-      const ix = ib ? (ib.x0 + ib.x1) / 2 : null, iy = ib ? (ib.y0 + ib.y1) / 2 : null;
-      return {
-        text: String(it.original).slice(0, 30),
-        chu_goc_px: ib ? [Math.round(ib.x0), Math.round(ib.y0), Math.round(ib.x1), Math.round(ib.y1)] : '(không có)',
-        sub_px: [Math.round(bx.x0), Math.round(bx.y0), Math.round(bx.x1), Math.round(bx.y1)],
-        dx_px: ib ? Math.round(cx - ix) : null,
-        dy_px: ib ? Math.round(cy - iy) : null,
-        dx_don_vi: ib ? Math.round(((cx - ix) / W) * 1000) : null,
-        dy_don_vi: ib ? Math.round(((cy - iy) / H) * 1000) : null,
-      };
-    }));
-  }
   return items;
 }
 
@@ -1078,6 +1190,7 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
     } else {
       const items = dedupeItems(rec.all);
       avoidOverlap(items);
+      nudgeOverlaps(items, rec.W, rec.H);
       rec.result = { img: rec.img, items, width: rec.W, height: rec.H, error: null };
     }
     geminiReport.set(rec.img.srcUrl, rec.raw);
@@ -1163,6 +1276,7 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
 
   // Bước 3: gửi PARALLEL_REQUESTS lô cùng lúc bằng Promise.all, xong nghỉ BATCH_PAUSE_MS rồi gửi nhóm kế
   for (let k = 0; k < batches.length; k += PARALLEL_REQUESTS) {
+    if (cancelCheck()) break; // đã hủy: không gửi thêm lô
     await Promise.all(batches.slice(k, k + PARALLEL_REQUESTS).map((b) => flush(b)));
     if (k + PARALLEL_REQUESTS < batches.length) await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
   }
@@ -1217,6 +1331,10 @@ async function runImageViewer(tabId, srcUrl, quiet = false) {
 }
 
 // ---------- Dịch tất cả ảnh trên trang ----------
+// Hủy lượt dịch đang chạy theo tab. Ảnh chưa vẽ xong sẽ được hoàn lượt ở cuối translateAll.
+const cancelFlags = new Map(); // tabId -> true khi người dùng bấm hủy
+let cancelCheck = () => false;
+
 async function translateAll(tabId, urls) {
   const list = [...new Set(urls)];
   if (!list.length) {
@@ -1230,6 +1348,8 @@ async function translateAll(tabId, urls) {
   const CHARGE_MAX = 50;
   let refs = []; // [{ ref, count }] các lần trừ đã thành công, để hoàn lại khi cần
   const stats = { drawn: 0 };
+  cancelFlags.delete(tabId);
+  cancelCheck = () => cancelFlags.get(tabId) === true;
   try {
     try {
       for (let i = 0; i < list.length; i += CHARGE_MAX) {
@@ -1253,6 +1373,8 @@ async function translateAll(tabId, urls) {
       if (n > 0) await Account.refund(r.ref, n);
       toRefund -= n;
     }
+    cancelFlags.delete(tabId);
+    notify(tabId, { type: 'QUEUE_CLEAR' }); // hết lượt: các ảnh còn trong hàng chờ không còn bị khoá
     await setJob(tabId, 'idle');
   }
 }
@@ -1277,6 +1399,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'REBIND_URL' && sender.tab) {
     // Trang đổi link ảnh đã dịch: đổi khoá URL ở trạng thái "Đã dịch" để side panel khớp ảnh mới
     renameDone(sender.tab.id, msg.oldUrl, msg.newUrl);
+    return false;
+  }
+  if (msg.type === 'CANCEL_TRANSLATE' && Number.isInteger(msg.tabId)) {
+    cancelFlags.set(msg.tabId, true);
     return false;
   }
   if (msg.type === 'TRANSLATE_ALL' && sender.tab) {

@@ -89,6 +89,7 @@ const translateBtn = $('translate');
 const selectAllCb = $('selectAllCb');
 const modal = $('modal');         // cài đặt
 const userModal = $('userModal'); // tài khoản
+const buyModal = $('buyModal'); // mua lượt dịch
 
 let items = []; // { url, w, h, checked, done, notext }
 let currentTabId = null;
@@ -204,6 +205,17 @@ function showAcctMsg(text) {
   $('acctMsg').textContent = text || '';
 }
 
+$('acctId').addEventListener('click', async () => {
+  const u = account && account.user;
+  if (!u || u.id == null) return;
+  try {
+    await navigator.clipboard.writeText(String(u.id));
+    const el = $('acctId');
+    el.textContent = 'Đã sao chép ID';
+    setTimeout(renderAccount, 1200);
+  } catch { /* bỏ qua */ }
+});
+
 function renderAccount() {
   const u = account && account.user;
   $('userBtn').title = u ? `${u.email}: còn ${u.credits} lượt dịch (miễn phí ${u.credits_free ?? 0}, đã mua ${u.credits_paid ?? 0})` : 'Đăng nhập Google';
@@ -211,6 +223,9 @@ function renderAccount() {
   $('acctAvatar').textContent = initial || '?';
   $('acctName').textContent = u ? (u.name || u.email) : 'Chưa đăng nhập';
   $('acctEmail').textContent = u ? u.email : '';
+  const idEl = $('acctId');
+  idEl.textContent = u && u.id != null ? `ID: ${u.id}` : '';
+  idEl.style.display = u && u.id != null ? '' : 'none';
   $('acctPlan').textContent = u ? ((u.credits_paid ?? 0) > 0 ? 'Đã mua lượt' : 'Miễn phí') : '–';
   $('acctFree').textContent = u ? String(u.credits_free ?? 0) : '–';
   $('acctPaid').textContent = u ? String(u.credits_paid ?? 0) : '–';
@@ -223,6 +238,74 @@ function renderAccount() {
 }
 
 // Làm mới số lượt và thông tin từ server theo nút trong modal
+// ---------- Mua lượt dịch: liệt kê gói (chỉ để tham khảo), hiện QR chuyển khoản VietQR ----------
+// Không chọn gói: khách tự nhập số tiền khi chuyển khoản, nội dung = "Ho tro <id user>" để đối soát.
+const PACKAGES = [
+  { vnd: 20000, n: 50 },
+  { vnd: 100000, n: 300 },
+  { vnd: 200000, n: 700 },
+  { vnd: 500000, n: 2000 },
+  { vnd: 1000000, n: 4500 },
+];
+const fmtVnd = (v) => v.toLocaleString('vi-VN') + 'đ';
+
+function renderPackages() {
+  const box = $('pkgs');
+  box.innerHTML = '';
+  for (const p of PACKAGES) {
+    const row = document.createElement('div');
+    row.className = 'pkg';
+    row.innerHTML = `<b>${fmtVnd(p.vnd)}</b><span>${p.n} lần dịch</span>`;
+    box.appendChild(row);
+  }
+}
+
+function renderQr() {
+  const u = account && account.user;
+  if (!u || u.id == null) {
+    $('qrImg').removeAttribute('src');
+    $('qrImg').style.display = 'none';
+    $('qrNote').textContent = 'Chưa có mã tài khoản. Bấm làm mới rồi thử lại.';
+    return;
+  }
+  $('qrImg').style.display = '';
+  $('qrImg').src = `https://img.vietqr.io/image/TPB-10006451830-qr_only.svg?&addInfo=Ho%20tro%20${u.id}`;
+  const note = $('qrNote');
+  note.textContent = '';
+  const content = document.createElement('div');
+  content.className = 'qr-content';
+  content.append('Nội Dung: ');
+  const idSpan = document.createElement('span');
+  idSpan.className = 'qr-id';
+  idSpan.textContent = String(u.id);
+  content.append(idSpan);
+  note.append(content);
+  // Thông tin được xử lý trong vòng 5 phút; nhấn làm mới để cập nhật trạng thái, hoặc liên hệ fanpage
+  const hint = document.createElement('div');
+  hint.className = 'qr-hint';
+  hint.append('Thông tin sẽ được xử lý trong vòng 5 phút. Hãy nhấn nút làm mới để cập nhật và kiểm tra trạng thái, hoặc liên hệ fanpage: ');
+  const a = document.createElement('a');
+  a.href = 'https://www.facebook.com/people/AI-Image-Translate/61596497217359/';
+  a.target = '_blank';
+  a.rel = 'noopener';
+  a.textContent = 'AI Image Translate';
+  hint.append(a);
+  note.append(hint);
+}
+
+// Mở modal "Mua lượt dịch" từ nút trong modal tài khoản
+$('buyToggle').onclick = async () => {
+  renderPackages();
+  $('qrBox').style.display = 'none';
+  openModal(buyModal, $('buyToggle'));
+  // Tài khoản lưu trước khi server trả về id thì chưa có id: lấy lại từ server rồi mới tạo QR
+  if (!(account && account.user && account.user.id != null)) await refreshAccount();
+  renderQr();
+  $('qrBox').style.display = '';
+};
+$('closeBuy').onclick = () => buyModal.classList.remove('show');
+buyModal.onclick = (e) => { if (e.target === buyModal) buyModal.classList.remove('show'); };
+
 // Làm mới số lượt và thông tin từ server (nút có ở cả hai trạng thái)
 let refreshingAcct = false;
 async function refreshAccount() {
@@ -233,9 +316,17 @@ async function refreshAccount() {
   btns.forEach((b) => { b.disabled = true; b.classList.add('spinning'); });
   showAcctMsg('');
   try {
-    const next = await Account.refresh();
-    account = next;
-    if (!next && hadAccount) showAcctMsg('Phiên đăng nhập đã hết. Hãy đăng nhập lại.');
+    const stored = await Account.load();
+    if (!stored) {
+      // Không có tài khoản lưu trong extension: không gọi /me được, báo cho người dùng biết
+      showAcctMsg('Chưa có tài khoản đã lưu. Hãy đăng nhập lại.');
+      account = null;
+    } else {
+      const next = await Account.refresh();
+      console.log('[acct] làm mới: /me ->', next ? 'ok' : 'null');
+      account = next;
+      if (!next && hadAccount) showAcctMsg('Phiên đăng nhập đã hết. Hãy đăng nhập lại.');
+    }
   } catch (err) {
     showAcctMsg(err.message);
   } finally {
@@ -403,8 +494,9 @@ function updateFooter() {
   selectAllCb.checked = eligible.length > 0 && selected === eligible.length;
   selectAllCb.disabled = busy || eligible.length === 0;
 
-  translateBtn.disabled = busy || selected === 0;
-  if (busy) translateBtn.textContent = 'Đang dịch...';
+  // Đang dịch: nút thành "Hủy dịch" (vẫn bấm được); ảnh chưa vẽ sẽ được hoàn lượt
+  translateBtn.disabled = !busy && selected === 0;
+  if (busy) translateBtn.textContent = 'Hủy dịch';
   else translateBtn.textContent = selected ? `Dịch ${selected} ảnh đã chọn` : 'Chưa chọn ảnh nào';
 
   // Chưa đăng nhập: nút này thành nút đăng nhập
@@ -418,7 +510,13 @@ selectAllCb.onchange = () => setAll(selectAllCb.checked);
 $('refresh').onclick = () => loadImages();
 
 translateBtn.onclick = async () => {
-  if (busy) return;
+  if (busy) {
+    const tab = await activeTab();
+    if (tab?.id != null) chrome.runtime.sendMessage({ type: 'CANCEL_TRANSLATE', tabId: tab.id });
+    translateBtn.disabled = true;
+    translateBtn.textContent = 'Đang hủy...';
+    return;
+  }
   if (!account) { doLogin(); return; }
   const urls = items.filter((x) => x.checked && !x.done && !x.notext).map((x) => x.url);
   if (!urls.length) return;

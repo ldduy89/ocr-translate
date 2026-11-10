@@ -2,7 +2,7 @@
 // Nạp bằng importScripts trong background.js và bằng <script> trong popup.html.
 
 // Đổi thành địa chỉ server thật khi triển khai (https://...). Khi thử trên máy thì để localhost.
-const SERVER_URL = 'http://localhost:3000';
+const SERVER_URL = 'https://ddtechtrans.up.railway.app';
 
 const Account = (() => {
   const KEY = 'account'; // chrome.storage.local: { token, user: { email, name, credits, credits_free, credits_paid, gemini_key } }
@@ -100,6 +100,10 @@ const Account = (() => {
   async function require() {
     const acc = await refresh();
     if (!acc) throw new Error('Hãy đăng nhập Google trong side panel để dịch.');
+    // Hết lượt thì key đã được thu hồi: báo đúng nguyên nhân thay vì báo đang chuẩn bị key
+    if (!(acc.user.credits > 0)) {
+      throw new Error('Bạn đã hết lượt dịch. Vui lòng mua thêm lượt để tiếp tục.');
+    }
     if (!acc.user.gemini_key) {
       throw new Error('Tài khoản đang được chuẩn bị key Gemini. Thử lại sau vài giây; nếu vẫn lỗi, liên hệ người quản trị.');
     }

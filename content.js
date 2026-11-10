@@ -17,6 +17,7 @@
       case 'SHOW_LOADING':    showToast('Đang nhận dạng và dịch...', 'info', TOAST_MS); break;
       case 'SHOW_ERROR':      showToast('⚠ ' + msg.error, 'error', TOAST_MS); refreshPill(); break;
       case 'HIDE_PANEL':      removePanel(); hideToast(); break;
+      case 'QUEUE_CLEAR':     queuedKeys.clear(); refreshPill(); break;
       case 'OVERLAY_IMAGE':   overlayImage(msg); break;
       case 'TRANSLATE_ALL_START': collectAndTranslateAll(msg.urls); break;
       case 'SHOW_INFO': {
@@ -488,6 +489,7 @@
   }
 
   function overlayImage({ srcUrl, width, height, items }) {
+    queuedKeys.delete(srcUrl);
     const img = findImage(srcUrl);
     if (!img) {
       console.warn('[OCR] không tìm thấy <img> cho', srcUrl);
@@ -627,6 +629,8 @@
       urls = collectImageUrls().map((x) => x.url);
     }
     showToast(`Đang dịch ${urls.length} ảnh...`, 'info', 0);
+    urls.forEach((u) => queuedKeys.add(u));
+    refreshPill();
     chrome.runtime.sendMessage({ type: 'TRANSLATE_ALL', urls });
   }
 
@@ -636,6 +640,7 @@
   const BTN_TEXT = {
     idle: 'Dịch ảnh',
     notext: 'Không có chữ',
+    waiting: 'Chờ dịch',
     loading: 'Đang dịch...',
     shown: '✓ Bản dịch',
     hidden: 'Xem bản dịch',
@@ -672,7 +677,7 @@
     @keyframes spin{to{transform:rotate(360deg)}}
     .pill[data-state=shown]{background:#1f9d55;color:#fff}
     .pill[data-state=hidden]{background:#2f7df6;color:#fff}
-    .pill[data-state=notext]{background:#6b7280;color:#fff;cursor:default}
+    .pill[data-state=notext],.pill[data-state=waiting]{background:#6b7280;color:#fff;cursor:default}
     .pill[data-state=shown] .ico img,.pill[data-state=hidden] .ico img{box-shadow:0 0 0 2px #fff}
     .pill.flash{animation:flash .9s ease-out 2}
     @keyframes flash{
@@ -837,6 +842,7 @@
   }
 
   function pillState(key) {
+    if (queuedKeys.has(key)) return 'waiting';
     if (noTextKeys.has(key)) return 'notext';
     if (pendingUrls.has(key)) return 'loading';
     const e = overlayEntries.get(key);
@@ -855,7 +861,7 @@
 
   function onPillClick(img) {
     const key = imgKey(img);
-    if (!key || pendingUrls.has(key) || noTextKeys.has(key)) return;
+    if (!key || pendingUrls.has(key) || noTextKeys.has(key) || queuedKeys.has(key)) return;
     const entry = overlayEntries.get(key);
     if (entry) { // đã dịch: bấm để chuyển qua lại giữa ảnh gốc và bản dịch
       entry.hidden = !entry.hidden;
@@ -925,6 +931,7 @@
 
   // Ảnh đã biết là không có chữ (background báo về): không hiện nút dịch
   const noTextKeys = new Set();
+  const queuedKeys = new Set(); // ảnh đã được đưa vào lượt dịch nhiều ảnh nhưng chưa vẽ xong
 
   function markNoText(key) {
     if (!key) return;
@@ -951,17 +958,44 @@
     const p = ensurePill();
     pillImg = img;
     refreshPill();
+    // Vị trí tính lại mỗi lần đặt, để nút bám theo ảnh khi cuộn
+    const place = () => {
+      const v = visibleRect(img);
+      if (v.r - v.l < BTN_MIN || v.b - v.t < 40) return false;
+      p.el.style.left = Math.max(v.l, v.r - p.el.offsetWidth - 10) + 'px';
+      p.el.style.top = v.t + 10 + 'px';
+      return true;
+    };
     const v = visibleRect(img);
     if (v.r - v.l < BTN_MIN || v.b - v.t < 40) { hidePill(); return; }
+    // Đang hiện đúng ảnh này: chỉ bám vị trí
+    if (p._target === img && p.el._shown) { place(); return; }
+    // Đang chờ chuyển sang ảnh này: để hẹn giờ tự xử lý
+    if (p._target === img && p._switchT) return;
+    const wasShown = p.el._shown;
+    p._target = img;
+    clearTimeout(p._switchT);
+    p._switchT = null;
+    if (wasShown) {
+      // Chuyển sang ảnh khác: thu nhỏ/mờ nút ở ảnh cũ, rồi hiện lại (có hiệu ứng) ở ảnh mới
+      setBtnShown(p.el, false);
+      p._switchT = setTimeout(() => {
+        p._switchT = null;
+        if (pillImg !== img) return;
+        // Phải hiện nút trước rồi mới đặt vị trí: khi đang ẩn, offsetWidth = 0 nên nút bị đẩy sang phải ra ngoài ảnh
+        setBtnShown(p.el, true);
+        if (!place()) setBtnShown(p.el, false);
+      }, 200);
+      return;
+    }
     setBtnShown(p.el, true);
-    p.el.style.left = Math.max(v.l, v.r - p.el.offsetWidth - 10) + 'px';
-    p.el.style.top = v.t + 10 + 'px';
+    place();
   }
-
   function hidePill() {
     clearTimeout(hideTimer);
     hideTimer = null;
     pillImg = null;
+    if (pill) { clearTimeout(pill._switchT); pill._switchT = null; pill._target = null; }
     if (pill) setBtnShown(pill.el, false);
   }
 

@@ -80,6 +80,8 @@
     .uc .meta { flex: 1; min-width: 0; }
     .uc .nm { font-size: 16px; font-weight: 700; color: #dcdfe4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .uc .em { font-size: 13px; color: #9aa3b2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .uc .uid { font-size: 12px; color: #7d8696; margin-top: 2px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: all; }
+    .uc .uid:hover { color: #61afef; }
     .uc .ibtn2 { width: 40px; height: 40px; flex: none; border: 1px solid #454c5a; border-radius: 10px; background: #353b46; color: #cbd5e1; display: flex; align-items: center; justify-content: center; cursor: pointer; }
     .uc .ibtn2:hover { background: #3f4653; color: #61afef; }
     .uc .ibtn2:disabled { opacity: .5; cursor: default; }
@@ -122,6 +124,17 @@
     .uc .guest-title { font-size: 18px; font-weight: 700; color: #dcdfe4; margin-bottom: 8px; }
     .uc .guest-sub { font-size: 14px; color: #9aa3b2; margin-bottom: 22px; line-height: 1.5; }
     .uc #loginBtn { width: 100%; padding: 12px; font-size: 15px; }
+    /* Mua lượt dịch */
+    .uc .pkgs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+    .uc .pkg { background: #252a32; border: 1px solid #3a3f4b; border-radius: 8px; color: #dcdfe4; padding: 8px 10px; text-align: left; }
+    .uc .pkg b { display: block; font-size: 14px; }
+    .uc .pkg span { font-size: 12px; color: #9aa3b2; }
+    .uc .qr-box { background: #fff; border-radius: 8px; padding: 10px; text-align: center; margin-bottom: 12px; }
+    .uc .qr-title { color: #111; font-weight: 700; font-size: 14px; margin: 0 0 8px; }
+    .uc .qr-box img { width: 220px; max-width: 100%; height: auto; }
+    .uc .qr-content { color: #111; font-weight: 400; font-size: 14px; text-align: center; margin: 4px 0 6px; }
+    .uc .qr-id { color: #dc2626; font-weight: 700; user-select: all; }
+    .uc .qr-note { color: #1f2937; font-size: 12px; margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -173,6 +186,7 @@
           <div class="meta">
             <div class="nm" id="acctName"></div>
             <div class="em" id="acctEmail"></div>
+            <div class="uid" id="acctId" title="Bấm để sao chép ID" style="display:none"></div>
           </div>
           <button class="ibtn2 refresh-btn" title="Làm mới thông tin" aria-label="Làm mới thông tin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg></button>
         </div>
@@ -182,12 +196,25 @@
           <div class="line"><span>Lượt đã mua</span><span class="b" id="acctPaid">–</span></div>
           <div class="line"><span>Lượt miễn phí</span><span class="w" id="acctFree">–</span></div>
         </div>
+        <button class="btn-blue" id="buyToggle" style="width:100%;margin-bottom:10px">Mua lượt dịch</button>
         <div class="btns">
           <button class="btn-red" id="logoutBtn">Đăng xuất</button>
         </div>
       </div>
 
       <div id="acctMsg"></div>
+    </div>
+  </div>
+
+  <div id="buyModal" class="modal">
+    <div class="dialog uc">
+      <h2>Mua lượt dịch <button class="x" id="closeBuy" aria-label="Đóng">×</button></h2>
+      <div class="pkgs" id="pkgs"></div>
+      <div id="qrBox" class="qr-box" style="display:none">
+        <div class="qr-title">Hình thức chuyển khoản</div>
+        <img id="qrImg" alt="Mã QR thanh toán" />
+        <div id="qrNote" class="qr-note"></div>
+      </div>
     </div>
   </div>
 
