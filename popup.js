@@ -245,7 +245,6 @@ const PACKAGES = [
   { vnd: 100000, n: 300 },
   { vnd: 200000, n: 700 },
   { vnd: 500000, n: 2000 },
-  { vnd: 1000000, n: 4500 },
 ];
 const fmtVnd = (v) => v.toLocaleString('vi-VN') + 'đ';
 

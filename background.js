@@ -654,20 +654,6 @@ async function translateAllGemini(tabId, urls, stats = { drawn: 0 }) {
     }
   }
 
-  const batches = [];
-  let cur = [];
-  let curBytes = 0;
-  for (const img of loaded.filter((x) => !x.tall && !x.blank)) {
-    if (cur.length && (cur.length >= BATCH_MAX_IMAGES || curBytes + img.blob.size > BATCH_MAX_BYTES)) {
-      batches.push(cur);
-      cur = [];
-      curBytes = 0;
-    }
-    cur.push(img);
-    curBytes += img.blob.size;
-  }
-  if (cur.length) batches.push(cur);
-
   const prompt = `You are given several images, each labeled "Image N". They are comic/manga pages or screenshots with speech bubbles or caption text.
 For each image, find every block of readable text. Merge lines that belong to the same sentence or bubble into one block.
 For each block return:
@@ -760,26 +746,6 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     }
   };
 
-  const suspects = [];
-  await askParallel(batches, undefined, async (res) => {
-    for (const { g: batch, perImage, err } of res) {
-      if (err) {
-        console.error('[OCR] lô Gemini lỗi', err);
-        batchErrors.push(...batch);
-        notify(tabId, { type: 'SHOW_ERROR', error: err.message });
-        continue;
-      }
-      for (let i = 0; i < batch.length; i++) {
-        const blocks = perImage[i];
-        if (blocks === null || blocks.length === 0) {
-          suspects.push(batch[i]);
-          continue;
-        }
-        await showBlocks(batch[i], blocks, true);
-      }
-    }
-  });
-
   // Chia ảnh thành các lô theo số lượng và dung lượng
   const makeGroups = (imgs) => {
     const groups = [];
@@ -819,42 +785,80 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     return { empty, failed };
   };
 
-  // Sau vòng 1: suspects là ảnh rỗng/thiếu do model trả lời
-  let emptyImgs = suspects;
+  // Xử lý đúng thứ tự trong danh sách ảnh (từ trên xuống dưới): chia thành các đoạn liên tiếp,
+  // mỗi đoạn hoặc toàn ảnh thường (gửi theo lô) hoặc toàn ảnh dài (cắt đoạn). Xong đoạn này mới sang đoạn sau.
+  // Ảnh bị nghi rỗng được hỏi lại ngay trong đoạn của nó, để bản dịch không bị vẽ lệch thứ tự.
+  let emptyImgs = [];
   let failedImgs = [];
 
-  // Vòng 2 và 3: gửi lại theo lô
-  for (let round = 2; round <= 3; round++) {
-    const work = [...emptyImgs, ...failedImgs];
-    if (!work.length) break;
-    ({ empty: emptyImgs, failed: failedImgs } = await runRecheckRound(work, round));
+  const onTallDone = async (r) => {
+    const img = r.img;
+    if (r.error) {
+      tallErrors.push(img.srcUrl);
+      console.error('[OCR] ảnh rất cao lỗi', img.srcUrl, r.error);
+      notify(tabId, { type: 'SHOW_ERROR', error: r.error.message });
+    } else if (r.items.length && !cancelCheck()) {
+      notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width: r.width, height: r.height, items: r.items });
+      ok++;
+      progress();
+      drawn.add(img.srcUrl);
+      await markDone(tabId, img.srcUrl);
+    } else {
+      tallEmpty.push(img.srcUrl);
+    }
+  };
+
+  const segments = [];
+  for (const x of loaded) {
+    if (x.blank) continue;
+    const last = segments[segments.length - 1];
+    if (last && last.tall === !!x.tall) last.imgs.push(x);
+    else segments.push({ tall: !!x.tall, imgs: [x] });
   }
 
-  // Vòng 4: chỉ khi vòng 3 còn hơn 1 ảnh rỗng. Chạy xong thì dừng.
-  if (emptyImgs.length > 1) {
-    const work = [...emptyImgs, ...failedImgs];
-    ({ empty: emptyImgs, failed: failedImgs } = await runRecheckRound(work, EXTRA_ROUND));
-  }
-
-  // Ảnh dài: gộp các đoạn vào các lô (xem geminiTallBatch). Mỗi ảnh được vẽ ngay khi xong, không đợi cả lô.
-  const tallImgs = loaded.filter((x) => x.tall);
-  if (tallImgs.length) {
-    await geminiTallBatch(tallImgs, apiKey, targetLang, async (r) => {
-      const img = r.img;
-      if (r.error) {
-        tallErrors.push(img.srcUrl);
-        console.error('[OCR] ảnh rất cao lỗi', img.srcUrl, r.error);
-        notify(tabId, { type: 'SHOW_ERROR', error: r.error.message });
-      } else if (r.items.length && !cancelCheck()) {
-        notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width: r.width, height: r.height, items: r.items });
-        ok++;
-        progress();
-        drawn.add(img.srcUrl);
-        await markDone(tabId, img.srcUrl);
-      } else {
-        tallEmpty.push(img.srcUrl);
+  for (let si = 0; si < segments.length; si++) {
+    if (cancelCheck()) break;
+    const seg = segments[si];
+    if (seg.tall) {
+      await geminiTallBatch(seg.imgs, apiKey, targetLang, onTallDone);
+      continue;
+    }
+    // Vòng 1 cho đoạn ảnh thường: gửi theo lô, vẽ ngay những ảnh đã có chữ
+    let segEmpty = [];
+    let segFailed = [];
+    await askParallel(makeGroups(seg.imgs), undefined, async (res) => {
+      for (const { g: batch, perImage, err } of res) {
+        if (err) {
+          console.error('[OCR] lô Gemini lỗi', err);
+          batchErrors.push(...batch);
+          notify(tabId, { type: 'SHOW_ERROR', error: err.message });
+          continue;
+        }
+        for (let i = 0; i < batch.length; i++) {
+          const blocks = perImage[i];
+          if (blocks === null || blocks.length === 0) {
+            segEmpty.push(batch[i]);
+            continue;
+          }
+          await showBlocks(batch[i], blocks, true);
+        }
       }
     });
+    // Vòng 2 và 3: gửi lại ngay các ảnh rỗng/thiếu của đoạn này
+    for (let round = 2; round <= 3; round++) {
+      const work = [...segEmpty, ...segFailed];
+      if (!work.length) break;
+      ({ empty: segEmpty, failed: segFailed } = await runRecheckRound(work, round));
+    }
+    emptyImgs.push(...segEmpty);
+    failedImgs.push(...segFailed);
+    if (si < segments.length - 1 && !cancelCheck()) await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
+  }
+
+  // Vòng 4: chỉ khi sau vòng 3 còn hơn 1 ảnh rỗng. Chạy xong thì dừng.
+  if (emptyImgs.length > 1 && !cancelCheck()) {
+    const work = [...emptyImgs, ...failedImgs];
+    ({ empty: emptyImgs, failed: failedImgs } = await runRecheckRound(work, EXTRA_ROUND));
   }
 
   // Tổng kết: mỗi ảnh nằm trong đúng một nhóm

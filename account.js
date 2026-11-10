@@ -2,7 +2,7 @@
 // Nạp bằng importScripts trong background.js và bằng <script> trong popup.html.
 
 // Đổi thành địa chỉ server thật khi triển khai (https://...). Khi thử trên máy thì để localhost.
-const SERVER_URL = 'https://ddtechtrans.up.railway.app';
+const SERVER_URL = 'http://localhost:3000';
 
 const Account = (() => {
   const KEY = 'account'; // chrome.storage.local: { token, user: { email, name, credits, credits_free, credits_paid, gemini_key } }

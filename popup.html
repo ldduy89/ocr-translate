@@ -36,6 +36,9 @@
     .empty { color: #9aa3b2; text-align: center; margin-top: 40px; }
     .foot { padding: 10px 12px; border-top: 1px solid #3a3f4b; }
     .foot .btn { width: 100%; }
+    .foot .contact { margin-top: 8px; text-align: center; font-size: 12px; color: #9aa3b2; }
+    .foot .contact a { color: #61afef; text-decoration: none; user-select: all; }
+    .foot .contact a:hover { text-decoration: underline; }
     /* Popup nằm sát phía trên (ngay dưới thanh công cụ), có hiệu ứng mờ dần và trượt xuống khi hiện/ẩn */
     .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, .55); display: flex; align-items: flex-start; justify-content: center; padding: 60px 12px 16px; box-sizing: border-box;
              opacity: 0; visibility: hidden; transition: opacity .2s ease, visibility 0s linear .28s; }
@@ -148,7 +151,9 @@
       <button class="ibtn" id="userBtn" title="Tài khoản" aria-label="Tài khoản"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg></button>
     </div>
     <div id="list"></div>
-    <div class="foot"><button class="btn primary" id="translate">Dịch ảnh đã chọn</button></div>
+    <div class="foot"><button class="btn primary" id="translate">Dịch ảnh đã chọn</button>
+      <div class="contact">Bạn cần hỗ trợ? <a href="mailto:ddtechtrans@gmail.com">ddtechtrans@gmail.com</a></div>
+    </div>
   </div>
 
   <div id="modal" class="modal">
