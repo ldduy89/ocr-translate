@@ -606,7 +606,7 @@ function countReminder(n) {
 }
 
 const BATCH_MAX_IMAGES = 8; // lô nhỏ: model lite hay trả "no text" hàng loạt khi lô lớn
-const PARALLEL_REQUESTS = 3; // số request chạy đồng thời (Promise.all)
+const PARALLEL_REQUESTS = 2; // số request chạy đồng thời (Promise.all)
 const BATCH_PAUSE_MS = 3000; // nghỉ sau mỗi nhóm request rồi mới gửi nhóm kế
 const BATCH_MAX_BYTES = 10 * 1024 * 1024;
 const EXTRA_ROUND = 4; // vòng cuối: chỉ chạy khi vòng 3 còn > 1 ảnh rỗng; chạy xong thì dừng
