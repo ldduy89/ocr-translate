@@ -4,7 +4,7 @@
 
   let panel = null;
 
-  // Ghi nhớ ảnh vừa chuột phải để biết phủ bản dịch lên đúng thẻ <img>
+  // Remember the image that was just right-clicked, so the translation is overlaid on the correct <img> tag
   let lastContextImg = null;
   document.addEventListener('contextmenu', (e) => {
     const t = e.target;
@@ -21,7 +21,7 @@
       case 'OVERLAY_IMAGE':   overlayImage(msg); break;
       case 'TRANSLATE_ALL_START': collectAndTranslateAll(msg.urls); break;
       case 'SHOW_INFO': {
-        // "Đang dịch: x/x" giữ nguyên đến khi xong; thông báo khác tự ẩn sau TOAST_MS
+        // "Translating: x/x" stays until done; other notices hide automatically after TOAST_MS
         const progressing = /^Đang dịch/.test(msg.text);
         showToast(msg.text, progressing ? 'info' : 'success', progressing ? 0 : TOAST_MS);
         break;
@@ -36,7 +36,7 @@
     }
   });
 
-  // ---------- Theo dõi thay đổi ảnh trên trang -> báo side panel làm mới danh sách ----------
+  // ---------- Watch for image changes on the page -> tell the side panel to refresh its list ----------
   const OWN_SELECTOR = '#ocr-pill-host, #ocr-dock-host, .ocr-img-overlay, #ocr-panel, #ocr-toast';
   function isOwnNode(n) {
     const el = n && n.nodeType === 1 ? n : (n && n.parentElement);
@@ -50,13 +50,13 @@
     clearTimeout(imgChangeTimer);
     imgChangeTimer = setTimeout(() => {
       chrome.runtime.sendMessage({ type: 'IMAGES_CHANGED' }).catch(() => {});
-    }, 700); // gom nhiều thay đổi liên tiếp (div bị vẽ lại) thành 1 lần
+    }, 700); // group several consecutive changes (re-rendered divs) into one update
   }
   function startImageWatch() {
     if (!document.body) return;
     new MutationObserver((records) => {
       for (const m of records) {
-        if (isOwnNode(m.target)) continue; // bỏ qua thay đổi do extension tự tạo
+        if (isOwnNode(m.target)) continue; // skip changes made by the extension itself
         if (m.type === 'attributes') {
           if (m.target.tagName === 'IMG') { notifyImagesChanged(); return; }
         } else if ([...m.addedNodes, ...m.removedNodes].some((n) => !isOwnNode(n) && hasImg(n))) {
@@ -70,16 +70,16 @@
       attributes: true,
       attributeFilter: ['src', 'srcset', 'data-src'],
     });
-    // Ảnh lazy gán src xong mới tải xong: báo thêm khi load
+    // Lazy image: finished loading after src was set; report again on load
     document.addEventListener('load', (e) => {
       if (e.target && e.target.tagName === 'IMG' && !isOwnNode(e.target)) notifyImagesChanged();
     }, true);
   }
   startImageWatch();
 
-  // Thông báo trạng thái / lỗi: toast nhỏ góc dưới phải. ms = 0 thì giữ đến khi tự đóng hoặc có thông báo mới.
-  // Khung "Dịch ảnh" không dùng cho thông báo nữa.
-  const TOAST_MS = 20000; // thời gian tự ẩn của thông báo thường
+  // Status/error notices: small toast at the bottom-right. ms = 0 keeps it until it is closed or a new notice appears.
+  // The "Translate image" panel is no longer used for notices.
+  const TOAST_MS = 20000; // auto-hide time for regular notices
   let toastTimer = null;
   function ensureToast() {
     let el = document.getElementById('ocr-toast');
@@ -108,7 +108,7 @@
     const color = kind === 'error' ? '#e06c75' : kind === 'success' ? '#98c379' : '#61afef';
     el.style.borderLeftColor = color;
     el.querySelector('.ocr-toast-text').textContent = text;
-    el.style.pointerEvents = 'auto'; // bấm được để đóng
+    el.style.pointerEvents = 'auto'; // clickable, to close
     el.style.opacity = '1';
     clearTimeout(toastTimer);
     toastTimer = null;
@@ -158,8 +158,8 @@
     document.body.appendChild(panel);
   }
 
-  // Chỉ trả về <img> có đúng địa chỉ ảnh. Không đoán bằng ảnh chuột phải gần nhất,
-  // vì như vậy bản dịch của ảnh khác sẽ bị phủ nhầm lên ảnh không được dịch
+  // Return only an <img> with exactly this image URL. Do not guess using the nearest right-clicked image,
+  // because that would overlay another image's translation onto an image that was not translated
   function findImage(srcUrl) {
     if (lastContextImg && (lastContextImg.currentSrc === srcUrl || lastContextImg.src === srcUrl)) {
       return lastContextImg;
@@ -167,8 +167,8 @@
     return [...document.images].find((i) => i.currentSrc === srcUrl || i.src === srcUrl) || null;
   }
 
-  // Cuộn trang (và các div cuộn chứa ảnh) tới ảnh có địa chỉ srcUrl. Dùng khi bấm ảnh đã dịch / không có chữ ở side panel.
-  // Ảnh cao hơn khung nhìn thì đưa đầu ảnh lên đầu khung; ảnh vừa khung thì canh giữa.
+  // Scroll the page (and any scrolling div containing the image) to the image with srcUrl. Used when clicking a translated or no-text image in the side panel.
+  // If the image is taller than the viewport, align its top with the top of the viewport; otherwise center it.
   function scrollToImage(srcUrl) {
     const entry = overlayEntries.get(srcUrl);
     const img = (entry && entry.img.isConnected) ? entry.img : findImage(srcUrl);
@@ -180,7 +180,7 @@
     return true;
   }
 
-  // Đo bằng canvas: ngắt dòng theo độ rộng khung, rồi chọn cỡ chữ lớn nhất vừa khung
+  // Measure with canvas: wrap lines to the box width, then pick the largest font size that fits
   const FONT_FAMILY = 'system-ui, "Segoe UI", Roboto, sans-serif';
   let measureCtx = null;
 
@@ -201,12 +201,12 @@
     return lines;
   }
 
-  // Hệ số cỡ chữ dịch so với bước dòng của chữ gốc (chỉnh nếu thấy chữ dịch to/nhỏ hơn chữ gốc)
+  // Font size of the translation relative to the original line spacing (adjust if the translated text looks bigger or smaller than the original)
   const FONT_CAP = 0.8;
-  const LINE_H = 1.0; // khoảng dòng; giữ đủ chỗ cho dấu tiếng Việt, tránh bị cắt
-  const MIN_FONT = 9; // sàn cứng: dưới mức này chữ không đọc được nữa
+  const LINE_H = 1.0; // line spacing; leaves room for Vietnamese diacritics so they are not clipped
+  const MIN_FONT = 9; // hard floor: below this size the text is unreadable
 
-  // maxSize: cỡ chữ tối đa theo chữ gốc trên hình (có thể không có)
+  // maxSize: maximum font size based on the original text in the image (may be absent)
   function fitText(div, text, w, h, maxSize) {
     if (!measureCtx) measureCtx = document.createElement('canvas').getContext('2d');
     let size = Math.max(MIN_FONT, Math.floor(h * 0.8));
@@ -220,7 +220,7 @@
       const fitsWidth = lines.every((l) => measureCtx.measureText(l).width <= w + 1);
       if (fitsHeight && fitsWidth) { fitted = true; break; }
     }
-    if (!fitted) size = MIN_FONT; // thật sự không vừa: dùng cỡ nhỏ nhất, chấp nhận tràn nhẹ
+    if (!fitted) size = MIN_FONT; // really does not fit: use the smallest size and accept a slight overflow
     measureCtx.font = `${size}px ${FONT_FAMILY}`;
     lines = wrapWords(text, w);
     div.style.fontSize = size + 'px';
@@ -230,25 +230,25 @@
     div.textContent = lines.join('\n');
   }
 
-  // Các lớp bản dịch đang hiển thị. Mỗi lớp được canh lại theo <img> hiện tại
-  // mỗi khi bố cục trang thay đổi (ảnh khác tải xong, đổi kích thước), nên không bị lệch khi trang dịch chuyển.
+  // Overlay layers currently shown. Each layer is re-aligned to its current <img>
+  // whenever the page layout changes (another image finishes loading, resize), so it does not drift when the page shifts.
   const overlayEntries = new Map();
   let layoutQueued = false;
 
-  // ---- Ảnh nằm trong div có cuộn riêng ----
-  // Lớp bản dịch được đặt NGAY TRONG div cuộn đó (toạ độ theo div), nên cuộn cùng nội dung
-  // và bị div cắt đúng như ảnh. Ảnh nằm thẳng trên trang thì vẫn gắn vào <body> như trước.
-  const hostPosition = new WeakMap(); // div cuộn -> giá trị position inline gốc (để khôi phục)
+  // ---- Image inside a div with its own scrollbar ----
+  // The overlay layer is placed INSIDE that scroll div (coordinates relative to the div), so it scrolls with the content
+  // and is clipped by the div just like the image. Images placed directly on the page are still attached to <body> as before.
+  const hostPosition = new WeakMap(); // scroll div -> original inline position value (to restore it later)
 
   function isClipping(v) {
     return v === 'auto' || v === 'scroll' || v === 'overlay' || v === 'hidden' || v === 'clip';
   }
 
-  // Tìm div cuộn (hoặc cắt nội dung) gần nhất thực sự chứa ảnh tràn ra; null nếu ảnh nằm thẳng trên trang
+  // Find the nearest scroll (or clipping) div that really contains the overflowing image; null if the image sits directly on the page
   function findScrollHost(img) {
     const htmlClips = isClipping(getComputedStyle(document.documentElement).overflowY);
     for (let el = img.parentElement; el && el !== document.documentElement; el = el.parentElement) {
-      if (el === document.body && !htmlClips) break; // body cuộn theo cửa sổ: xử lý như ảnh thường
+      if (el === document.body && !htmlClips) break; // body scrolls with the window: handle it like a normal image
       const cs = getComputedStyle(el);
       if (!isClipping(cs.overflowX) && !isClipping(cs.overflowY)) continue;
       if (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1) return el;
@@ -256,7 +256,7 @@
     return null;
   }
 
-  // Lớp tuyệt đối chỉ cuộn theo div khi div là khối chứa; nếu div đang static thì tạm đặt relative
+  // An absolutely positioned layer only scrolls with a div when that div is its containing block; if the div is static, set it to relative temporarily
   function ensurePositioned(host) {
     if (getComputedStyle(host).position !== 'static') return;
     if (!hostPosition.has(host)) hostPosition.set(host, host.style.position);
@@ -265,7 +265,7 @@
 
   function releaseHost(host) {
     if (!host || !hostPosition.has(host)) return;
-    for (const e of overlayEntries.values()) if (e.host === host) return; // còn ảnh khác dùng
+    for (const e of overlayEntries.values()) if (e.host === host) return; // another image still uses this host
     host.style.position = hostPosition.get(host);
     hostPosition.delete(host);
   }
@@ -284,32 +284,32 @@
     return r.width / Math.max(1, r.height);
   }
 
-  // Danh sách <img> theo thứ tự DOM trong khung scroll (hoặc cả trang nếu ảnh không nằm trong div cuộn)
+  // List of <img> in DOM order inside the scroll container (or the whole page if the image is not inside a scroll div)
   function imagesIn(container) {
     return container === document ? [...document.images] : [...container.querySelectorAll('img')];
   }
 
-  // Ghi nhớ ảnh đã dịch là ảnh thứ mấy trong khung scroll của nó
+  // Record which index the translated image has within its scroll container
   function snapshotEntry(entry) {
     const im = entry.img;
     entry.cont = findScrollHost(im) || document;
     entry.ord = imagesIn(entry.cont).indexOf(im);
   }
 
-  // Tìm lại ảnh thay thế: lấy đúng ảnh cùng số thứ tự trong khung scroll (vd đã dịch ảnh thứ 5 thì lấy ảnh thứ 5).
-  // Ảnh đó chưa có hoặc khác tỉ lệ khung hình (lệch >5%) thì trả về null: ẩn tạm và thử lại, không đoán sang ảnh khác.
+  // Find a replacement image: take the image with the same index in the scroll container (e.g. if image 5 was translated, take image 5).
+  // If that image has no translation yet or has a different aspect ratio (off by more than 5%), return null: hide temporarily and retry, do not guess another image.
   function findByPosition(entry) {
     if (!(entry.ord >= 0)) return null;
     const cont = entry.cont && (entry.cont === document || entry.cont.isConnected) ? entry.cont : document;
     const cand = imagesIn(cont)[entry.ord];
     if (!cand || !cand.isConnected) return null;
-    for (const e of overlayEntries.values()) if (e !== entry && e.img === cand) return null; // đã gắn bản dịch khác
+    for (const e of overlayEntries.values()) if (e !== entry && e.img === cand) return null; // already has another translation attached
     const aspectOld = entry.width / entry.height;
     return Math.abs(aspectOf(cand) / aspectOld - 1) <= 0.05 ? cand : null;
   }
 
-  // Gắn bản dịch sang <img> mới / link mới và cập nhật khoá URL (kể cả trạng thái "Đã dịch" ở side panel).
-  // Khác tỉ lệ ảnh nghĩa là ảnh khác hẳn: gỡ bản dịch cho khỏi sai chỗ.
+  // Attach the translation to the new <img> / new link and update the URL key (including the "Translated" state in the side panel).
+  // A different aspect ratio means a different image: remove the translation so it does not sit in the wrong place.
   function rebindEntry(entry, newImg) {
     const aspectOld = entry.width / entry.height;
     const aspectNew = newImg.naturalWidth > 0
@@ -321,7 +321,7 @@
     }
     const oldUrl = entry.srcUrl;
     const newUrl = imgKey(newImg);
-    if (!newUrl) return false; // ảnh mới chưa có link (đang tải): thử lại lần sau
+    if (!newUrl) return false; // new image has no link yet (still loading): retry next time
     if (newImg !== entry.img) {
       layoutObserver.unobserve(entry.img);
       entry.img = newImg;
@@ -344,21 +344,21 @@
     const { layer, width, height, items } = entry;
     let img = entry.img;
     if (!img.isConnected) {
-      // Trang dựng lại <img> (thường gặp khi cửa sổ đổi cỡ, vd mở side panel): tìm lại ảnh theo URL
-      // và gắn bản dịch vào đó, không xoá bản dịch. Chưa thấy thì ẩn tạm và thử lại ở lần kiểm tra sau.
-      // (URL cũ không còn thì tìm theo vị trí/kích thước, rồi cập nhật URL mới vào bản dịch)
+      // The page rebuilt the <img> (common when the window is resized, e.g. the side panel opens): find the image again by its URL
+      // and attach the translation to it instead of deleting it. If it is not found, hide temporarily and retry at the next check.
+      // (if the old URL is gone, find the image by position and size, then store the new URL in the translation)
       const again = findImage(entry.srcUrl) || findByPosition(entry);
       if (again && again.isConnected && rebindEntry(entry, again)) {
         img = entry.img;
       } else {
-        if (overlayEntries.get(entry.srcUrl) === entry) { // chưa bị gỡ vì khác tỉ lệ: ẩn tạm, thử lại sau
+        if (overlayEntries.get(entry.srcUrl) === entry) { // not removed for aspect-ratio reasons: hide temporarily and retry later
           layer.style.display = 'none';
           if (entry.pin) setBtnShown(entry.pin.el, false);
         }
         return;
       }
     } else if (imgKey(img) && imgKey(img) !== entry.srcUrl) {
-      // Cùng thẻ <img> nhưng trang đổi sang link khác: cập nhật link, giữ bản dịch
+      // Same <img> element, but the page changed to a different link: update the link and keep the translation
       if (!rebindEntry(entry, img)) return;
     }
     const rect = img.getBoundingClientRect();
@@ -375,7 +375,7 @@
     const parent = host || document.body;
     if (layer.parentNode !== parent) {
       if (host) ensurePositioned(host);
-      parent.appendChild(layer); // cũng chạy lại khi trang dựng lại DOM và làm mất lớp
+      parent.appendChild(layer); // also runs when the page rebuilds the DOM and removes the layer
       entry.sizeKey = '';
     }
 
@@ -397,7 +397,7 @@
     });
     updatePin(entry);
 
-    // Chỉ dựng lại chữ khi kích thước ảnh đổi; chỉ cuộn hoặc dịch chỗ thì chỉ cần dời lớp
+    // Re-render the text only when the image size changes; for scrolling or moving only, just move the layer
     const sizeKey = rect.width.toFixed(1) + 'x' + rect.height.toFixed(1);
     if (entry.sizeKey === sizeKey) return;
     entry.sizeKey = sizeKey;
@@ -408,7 +408,7 @@
     for (const it of items) {
       if (!it.translated) continue;
       const ellipse = it.shape === 'ellipse';
-      // Bong bóng tròn/oval: thu nhẹ 1% để còn thấy viền gốc; khung chữ nhận ở vùng trong elip
+      // Round bubble/oval: shrink by 1% so the original outline is still visible; the text box is taken from inside the ellipse
       const inset = ellipse ? 0.01 : 0;
       const bw = (it.box.x1 - it.box.x0) * sx;
       const bh = (it.box.y1 - it.box.y0) * sy;
@@ -417,14 +417,14 @@
       const w = ellipse ? bw * (1 - 2 * inset) : bw + 2 * pad;
       const h = ellipse ? bh * (1 - 2 * inset) : bh + 2 * pad;
       if (w < 6 || h < 6) continue;
-      // Vùng chữ: elip chỉ dùng phần chữ nhật nằm gọn trong elip (~73%); khung chữ nhật chừa lề đều 7%
-      // (tối thiểu 6px) để chữ không sát hoặc bị cắt ở mép
-      const k = ellipse ? 0.73 : 1; // 0,78 cũ làm chữ chạm mép; 0,73 là mức vừa phải
+      // Text area: for an ellipse, use only the rectangle that fits inside it (~73%); for a rectangle, keep an even 7% margin
+      // (minimum 6px) so the text does not touch or get clipped at the edges
+      const k = ellipse ? 0.73 : 1; // const k = ellipse ? 0.73 : 1; // 0.78 previously made text touch the edge; 0.73 is a moderate level
       const mx = ellipse ? (w - w * k) / 2 : Math.max(6, Math.min(w, h) * 0.07);
       const my = ellipse ? (h - h * k) / 2 : Math.max(6, Math.min(w, h) * 0.07);
       const tw = w - 2 * mx;
       const th = h - 2 * my;
-      // Bo góc cho khung chữ nhật (theo cạnh ngắn, tối đa 28px)
+      // Corner radius for rectangular boxes (based on the short side, max 28px)
       const radius = ellipse ? '50%' : Math.min(28, Math.min(w, h) * 0.12) + 'px';
 
       const div = document.createElement('div');
@@ -441,7 +441,7 @@
         alignItems: 'center',
         justifyContent: 'center',
         textAlign: 'center',
-        overflow: 'visible', // chỉ tràn khi đã xuống cỡ chữ sàn
+        overflow: 'visible', // overflow only once the font has reached the floor size
         lineHeight: String(LINE_H),
         fontFamily: FONT_FAMILY,
         boxSizing: 'border-box',
@@ -449,7 +449,7 @@
         padding: `${my}px ${mx}px`,
       });
       layer.appendChild(div);
-      // Cỡ chữ gốc từ Gemini làm trần (không to hơn chữ gốc); không có thì dùng khoảng dòng đo được
+      // Original font size from Gemini as a cap (never larger than the original text); if absent, use the measured line spacing
       const cap = it.fontPx ? it.fontPx * sy : it.linePx ? it.linePx * sy * FONT_CAP : 0;
       fitText(div, it.translated, tw, th, cap);
     }
@@ -472,10 +472,10 @@
   const layoutObserver = new ResizeObserver(scheduleLayout);
   if (document.body) layoutObserver.observe(document.body);
   window.addEventListener('resize', scheduleLayout);
-  // Cuộn ở bất kỳ div nào (scroll không nổi bọt nên bắt ở giai đoạn capture)
+  // Scroll in any div (scroll does not bubble, so catch it in the capture phase)
   window.addEventListener('scroll', scheduleLayout, true);
 
-  // Ảnh phía trên tải xong làm ảnh bên dưới dịch chỗ mà ảnh đó không đổi kích thước: kiểm tra định kỳ
+  // An image above finished loading and pushed the image below it without resizing it: check periodically
   let pollTimer = null;
   function startPolling() {
     if (pollTimer) return;
@@ -496,7 +496,7 @@
       console.warn('[OCR] không tìm thấy <img> cho', srcUrl);
       return;
     }
-    // Chỉ thay bản dịch của đúng ảnh này, giữ bản dịch các ảnh khác
+    // Replace only the translation of this image; keep the translations of other images
     const old = overlayEntries.get(srcUrl);
     if (old) removeEntry(old);
     document.querySelectorAll('.ocr-img-overlay').forEach((n) => {
@@ -513,19 +513,19 @@
       pointerEvents: 'none',
     });
 
-    // layoutOverlay tự gắn lớp vào đúng chỗ (body hoặc div cuộn chứa ảnh)
+    // layoutOverlay attaches the layer to the right place itself (body or the scroll div containing the image)
     const entry = { srcUrl, img, layer, width, height, items, host: undefined, sizeKey: '', hidden: false };
     overlayEntries.set(srcUrl, entry);
     layoutObserver.observe(img);
-    entry.flashUntil = Date.now() + 2500; // nháy ngay khi nút hiện, trong vòng 2,5 giây sau khi dịch xong
+    entry.flashUntil = Date.now() + 2500; // flash as soon as the button appears, within 2.5 seconds after translation finishes
     entry.flashed = false;
     layoutOverlay(entry);
-    removePendingPin(srcUrl); // nút cố định của bản dịch (updatePin trong layoutOverlay) thay vào ngay
-    if (pillImg === img) hidePill(); // nút rê chuột nhường chỗ cho nút cố định
+    removePendingPin(srcUrl); // the fixed button for the translation (updatePin in layoutOverlay) replaces it right away
+    if (pillImg === img) hidePill(); // the hover button yields to the fixed button
     startPolling();
   }
 
-  // Chờ một ảnh tải xong, tối đa 4 giây
+  // Wait for an image to finish loading, up to 4 seconds
   function waitLoaded(img) {
     if (img.complete && img.naturalWidth > 0) return Promise.resolve();
     return new Promise((resolve) => {
@@ -535,8 +535,8 @@
     });
   }
 
-  // Đọc ảnh blob: ngay trong trang (cùng origin nên fetch được), trả về data URL.
-  // Định dạng ngoài png/jpeg/webp (gif, avif...) được vẽ lại thành PNG.
+  // Read a blob image inside the page (same origin, so fetch works) and return a data URL.
+  // Formats other than png/jpeg/webp (gif, avif, ...) are redrawn as PNG.
   const GEMINI_MIMES = ['image/png', 'image/jpeg', 'image/webp'];
   function readAsDataUrl(blob) {
     return new Promise((resolve, reject) => {
@@ -561,7 +561,7 @@
       bmp.close();
       return c.toDataURL('image/png');
     } catch (err) {
-      // blob đã bị thu hồi hoặc bị CSP chặn: vẽ lại từ thẻ <img> đang hiển thị
+      // blob was revoked or blocked by CSP: redraw from the <img> currently displayed
       const img = findImage(url);
       if (!img || !img.naturalWidth) throw err;
       const c = document.createElement('canvas');
@@ -572,7 +572,7 @@
     }
   }
 
-  // Ảnh thu nhỏ cho side panel (side panel không mở được blob: của trang)
+  // Thumbnail for the side panel (the side panel cannot open the page's blob: URLs)
   function makeThumb(img) {
     try {
       const w = 160;
@@ -588,7 +588,7 @@
     }
   }
 
-  // Danh sách ảnh đủ lớn trên trang, không trùng URL
+  // List of large images on the page, without duplicate URLs
   function collectImageUrls() {
     const seen = new Set();
     const out = [];
@@ -607,7 +607,7 @@
     return out;
   }
 
-  // Ảnh lazy trong div cuộn chưa tải vì chưa cuộn tới: ép tải ngay
+  // Lazy image in a scroll div that has not loaded yet because it was never scrolled to: force loading now
   function forceEagerImages() {
     for (const i of document.images) if (i.loading === 'lazy') i.loading = 'eager';
   }
@@ -618,7 +618,7 @@
     return { images: collectImageUrls() };
   }
 
-  // selected: danh sách URL người dùng đã chọn trong side panel; không có thì lấy tất cả
+  // selected: list of URLs the user picked in the side panel; if absent, use all
   async function collectAndTranslateAll(selected) {
     showToast('Đang tải các ảnh trên trang...', 'info', TOAST_MS);
     let urls;
@@ -635,9 +635,9 @@
     chrome.runtime.sendMessage({ type: 'TRANSLATE_ALL', urls });
   }
 
-  // ================= Nút "Dịch ảnh" chỉ hiện khi rê chuột vào ảnh =================
-  // Một nút duy nhất (Shadow DOM, không bị CSS của trang ảnh hưởng). Rê chuột vào ảnh thì nút hiện ở
-  // góc trên bên phải phần ảnh đang thấy; rời ảnh, cuộn hoặc đổi cỡ cửa sổ thì nút ẩn. Không chạy nền.
+  // ================= "Translate image" button: shown only while hovering over the image =================
+  // A single button (Shadow DOM, so the page's CSS does not affect it). Hovering an image shows the button at the
+  // top-right corner of the visible part of the image; leaving the image, scrolling, or resizing the window hides it. It does not run in the background.
   const BTN_TEXT = {
     idle: 'Dịch ảnh',
     notext: 'Không có chữ',
@@ -646,17 +646,17 @@
     shown: '✓ Bản dịch',
     hidden: 'Xem bản dịch',
   };
-  const BTN_MIN = 120;           // chỉ áp dụng cho ảnh hiển thị ≥ 120px mỗi chiều
-  const HIDE_DELAY = 150;        // ms chờ trước khi ẩn nút khi chuột rời ảnh
-  const pendingUrls = new Set(); // ảnh đang dịch bằng nút
+  const BTN_MIN = 120;           // applies only to images at least 120px in each dimension
+  const HIDE_DELAY = 150;        // ms to wait before hiding the button when the mouse leaves the image
+  const pendingUrls = new Set(); // images being translated with the button
   let pillHost = null;
   let pill = null;               // { el, label }
-  let pillRoot = null;           // shadow root chứa mọi nút
-  let pillImg = null;            // ảnh mà nút đang gắn
+  let pillRoot = null;           // shadow root containing all buttons
+  let pillImg = null;            // the image the button is attached to
   let pillsEnabled = true;
   let hideTimer = null;
   let moveQueued = false;
-  let lastX = -1; // -1: chưa biết vị trí chuột
+  let lastX = -1; // -1: mouse position not known yet
   let lastY = -1;
 
   const ICON_SVG = '<svg viewBox="0 0 24 24" width="24" height="24"><rect width="24" height="24" rx="6" fill="#4da3ff"/>' +
@@ -687,8 +687,8 @@
       65%{transform:scale(1);box-shadow:0 0 0 16px rgba(31,157,85,0)}
       100%{transform:scale(1);box-shadow:0 2px 10px rgba(0,0,0,.3)}}`;
 
-  // Ẩn/hiện nút có hiệu ứng mờ + thu nhỏ. Hiện: đặt display rồi mới thêm .on để chạy hiệu ứng vào.
-  // Ẩn: bỏ .on rồi sau khi hiệu ứng xong mới đặt display:none.
+  // Show/hide the button with a fade and shrink. Show: set display first, then add .on so the animation plays.
+  // Hide: remove .on, then set display:none after the animation finishes.
   function setBtnShown(el, on) {
     if (!el) return;
     clearTimeout(el._hideT);
@@ -696,7 +696,7 @@
       if (el._shown) return;
       el._shown = true;
       el.style.display = 'flex';
-      void el.offsetWidth; // ép trình duyệt tính layout trước khi đổi opacity/transform
+      void el.offsetWidth; // force layout before changing opacity/transform
       el.classList.add('on');
     } else {
       if (!el._shown) { el.style.display = 'none'; return; }
@@ -722,7 +722,7 @@
     return pill;
   }
 
-  // Tạo một nút (icon + chữ) trong shadow root; onClick chạy khi bấm
+  // Create one button (icon + text) in the shadow root; onClick runs when it is clicked
   function makeButton(onClick) {
     const el = document.createElement('button');
     el.className = 'pill';
@@ -731,16 +731,16 @@
     ico.className = 'ico';
     const im = document.createElement('img');
     try { im.src = chrome.runtime.getURL('icons/icon48.png'); } catch (_) {}
-    im.onerror = () => { ico.innerHTML = ICON_SVG; }; // chưa có icon thì dùng hình dự phòng
+    im.onerror = () => { ico.innerHTML = ICON_SVG; }; // no icon yet: use the fallback image
     ico.appendChild(im);
     const label = document.createElement('span');
     el.append(ico, label);
-    // Hết hiệu ứng, hoặc bị huỷ vì nút bị ẩn (display:none khi ảnh cuộn ra khỏi màn hình) thì gỡ class,
-    // để lúc nút hiện lại không bị chạy lại từ đầu: hiệu ứng chỉ chạy đúng một lần lúc vừa dịch xong
+    // When the animation ends, or is cancelled because the button is hidden (display:none when the image scrolls off screen), remove the class,
+    // so the animation does not replay when the button shows again: it runs only once, right after translation finishes
     for (const ev of ['animationend', 'animationcancel']) {
       el.addEventListener(ev, (e) => { if (e.animationName === 'flash') el.classList.remove('flash'); });
     }
-    // Không cho sự kiện lọt xuống trang (tránh lật trang/zoom ảnh khi bấm nút)
+    // Stop the event from reaching the page (avoid flipping the page or zooming the image when clicked)
     for (const t of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'dblclick', 'contextmenu']) {
       el.addEventListener(t, (e) => e.stopPropagation());
     }
@@ -753,22 +753,22 @@
     return { el, label };
   }
 
-  // Ảnh đã dịch: nút luôn hiện cố định ở góc trên phải phần ảnh đang thấy (không phụ thuộc rê chuột),
-  // kể cả khi đang xem ảnh gốc, để còn bấm quay lại bản dịch
+  // Translated image: the button stays fixed at the top-right of the visible part of the image (independent of hover),
+  // even while viewing the original, so you can click it to switch back to the translation
   function ensurePin(entry) {
     if (entry.pin && entry.pin.el.isConnected) return entry.pin;
-    ensurePill(); // đảm bảo host/shadow root đã có
+    ensurePill(); // make sure the host/shadow root exists
     entry.pin = makeButton(() => onPillClick(entry.img));
     return entry.pin;
   }
 
   function updatePin(entry) {
     const v = visibleRect(entry.img);
-    if (pendingUrls.has(entry.srcUrl)) { // đang dịch lại: nút xoay thay chỗ nút này
+    if (pendingUrls.has(entry.srcUrl)) { // translating again: the spinning icon replaces this button
       if (entry.pin) setBtnShown(entry.pin.el, false);
       return;
     }
-    if (!pillsEnabled || v.r - v.l < BTN_MIN || v.b - v.t < 40) { // ảnh cuộn ra khỏi màn hình / quá nhỏ
+    if (!pillsEnabled || v.r - v.l < BTN_MIN || v.b - v.t < 40) { // image scrolled off screen or too small
       if (entry.pin) setBtnShown(entry.pin.el, false);
       return;
     }
@@ -780,27 +780,27 @@
     setBtnShown(pin.el, true);
     pin.el.style.left = Math.max(v.l, v.r - pin.el.offsetWidth - 10) + 'px';
     pin.el.style.top = v.t + 10 + 'px';
-    // Vừa dịch xong và nút đang hiện: nháy đúng một lần. Lúc overlayImage chạy thì nút còn bị ẩn
-    // (pendingUrls chưa xoá), nên việc nháy được hoãn tới lần updatePin đầu tiên nút thực sự hiện.
+    // Just translated and the button is visible: flash exactly once. When overlayImage runs the button is still hidden
+    // (pendingUrls not yet cleared), so the flash is deferred until the first updatePin where the button is actually shown.
     if (entry.flashUntil && !entry.flashed) {
       if (Date.now() <= entry.flashUntil) { entry.flashed = true; flashPin(entry); }
-      else entry.flashUntil = 0; // quá hạn (ảnh nằm ngoài màn hình lúc dịch xong): bỏ, không nháy khi cuộn tới
+      else entry.flashUntil = 0; // expired (the image was off screen when translation finished): drop it, do not flash when scrolled into view
     }
   }
 
-  // Vừa dịch xong: nút nháy/nhún vài lần cho dễ thấy, rồi đứng yên
+  // Just translated: the button flashes and bounces a few times to get attention, then stays still
   function flashPin(entry) {
     const el = entry.pin && entry.pin.el;
     if (!el || !el._shown) return;
     el.classList.remove('flash');
-    void el.offsetWidth; // khởi động lại animation
+    void el.offsetWidth; // restart the animation
     el.classList.add('flash');
   }
 
   function imgKey(img) { return img.currentSrc || img.src; }
 
-  // Ảnh đang dịch bằng nút: giữ nút (icon xoay) hiện cố định ở góc trên phải phần ảnh đang thấy,
-  // không phụ thuộc rê chuột, đến khi dịch xong (nút cố định của bản dịch sẽ thay vào) hoặc lỗi.
+  // Image being translated with the button: keep the button (spinning icon) fixed at the top-right of the visible part of the image,
+  // independent of hover, until translation finishes (the fixed translation button replaces it) or an error occurs.
   const pendingPins = new Map(); // srcUrl -> { img, btn }
 
   function addPendingPin(key, img) {
@@ -824,12 +824,12 @@
   function updatePendingPin(key) {
     const p = pendingPins.get(key);
     if (!p) return;
-    if (!p.img.isConnected) { // trang dựng lại thẻ <img>: tìm lại theo URL
+    if (!p.img.isConnected) { // page rebuilt the <img>: find it again by URL
       const again = findImage(key);
       if (again) p.img = again;
     }
     const v = p.img.isConnected ? visibleRect(p.img) : null;
-    if (!pillsEnabled || !v || v.r - v.l < BTN_MIN || v.b - v.t < 40) { // đang ngoài màn hình: ẩn tạm, cuộn lại sẽ hiện
+    if (!pillsEnabled || !v || v.r - v.l < BTN_MIN || v.b - v.t < 40) { // off screen: hide temporarily; it shows again when scrolled back
       setBtnShown(p.btn.el, false);
       return;
     }
@@ -851,7 +851,7 @@
     return e.hidden ? 'hidden' : 'shown';
   }
 
-  // Cập nhật chữ/trạng thái của nút theo ảnh đang gắn (không đổi vị trí)
+  // Update the button's text/state according to the attached image (position is not changed)
   function refreshPill() {
     if (!pill || !pillImg) return;
     const state = pillState(imgKey(pillImg));
@@ -864,7 +864,7 @@
     const key = imgKey(img);
     if (!key || pendingUrls.has(key) || noTextKeys.has(key) || queuedKeys.has(key)) return;
     const entry = overlayEntries.get(key);
-    if (entry) { // đã dịch: bấm để chuyển qua lại giữa ảnh gốc và bản dịch
+    if (entry) { // translated: click to toggle between the original and the translation
       entry.hidden = !entry.hidden;
       entry.layer.style.display = entry.hidden ? 'none' : 'block';
       updatePin(entry);
@@ -874,16 +874,16 @@
     startTranslate(img, key);
   }
 
-  // Menu chuột phải "dịch ảnh này": chạy y như bấm nút trên ảnh (icon xoay trên ảnh, không mở bảng ở góc dưới phải).
-  // Ảnh đã có bản dịch thì không dịch lại. Trả về false nếu không tìm thấy thẻ <img>
-  // (vd ảnh nền CSS, ảnh trong iframe) để background dùng cách cũ.
+  // Right-click "translate this image": works exactly like the button on the image (spinning icon on the image, does not open the bottom-right panel).
+  // If the image already has a translation, do not translate it again. Returns false if no <img> is found
+  // (e.g. CSS background image, image inside an iframe) so the background falls back to the old method.
   function translateFromMenu(srcUrl) {
     const img = findImage(srcUrl);
     if (!img) return false;
     const key = imgKey(img);
     if (!key) return false;
     const entry = overlayEntries.get(key);
-    if (entry) { // đã dịch rồi: không dịch lại; đang xem ảnh gốc thì bật lại bản dịch
+    if (entry) { // already translated: do not translate again; if viewing the original, turn the translation back on
       if (entry.hidden) {
         entry.hidden = false;
         entry.layer.style.display = 'block';
@@ -898,11 +898,11 @@
   function startTranslate(img, key) {
     pendingUrls.add(key);
     addPendingPin(key, img);
-    hidePill(); // nút rê chuột nhường chỗ cho nút cố định đang xoay
+    hidePill(); // the hover button yields to the spinning fixed button
     const done = () => {
       pendingUrls.delete(key); removePendingPin(key); refreshPill();
       const e = overlayEntries.get(key);
-      if (e) updatePin(e); // hiện nút bản dịch (và nháy) ngay, khỏi chờ lần kiểm tra định kỳ
+      if (e) updatePin(e); // show the translation button (and flash) immediately instead of waiting for the periodic check
     };
     try {
       chrome.runtime.sendMessage({ type: 'TRANSLATE_ONE', srcUrl: key }, () => {
@@ -910,11 +910,11 @@
         done();
       });
     } catch (_) {
-      done(); // extension vừa được tải lại: cần F5 trang
+      done(); // the extension was just reloaded: a page refresh (F5) is needed
     }
   }
 
-  // Phần ảnh đang nhìn thấy: giao của ảnh, khung nhìn và các div cuộn/cắt chứa nó
+  // The visible part of the image: intersection of the image, the viewport, and the scroll/clip divs containing it
   function visibleRect(img) {
     const r = img.getBoundingClientRect();
     let l = Math.max(r.left, 0), t = Math.max(r.top, 0);
@@ -930,9 +930,9 @@
     return { l, t, r: rt, b };
   }
 
-  // Ảnh đã biết là không có chữ (background báo về): không hiện nút dịch
+  // image known to have no text (reported by background): do not show the translate button
   const noTextKeys = new Set();
-  const queuedKeys = new Set(); // ảnh đã được đưa vào lượt dịch nhiều ảnh nhưng chưa vẽ xong
+  const queuedKeys = new Set(); // images added to a multi-image run but not yet drawn
 
   function markNoText(key) {
     if (!key) return;
@@ -940,7 +940,7 @@
     if (pillImg && imgKey(pillImg) === key) refreshPill();
   }
 
-  // Lúc tải trang: hỏi background danh sách ảnh đã biết là không có chữ của tab này
+  // On page load: ask background for the list of known no-text images for this tab
   try {
     chrome.runtime.sendMessage({ type: 'GET_NOTEXT' }, (res) => {
       void chrome.runtime.lastError;
@@ -959,7 +959,7 @@
     const p = ensurePill();
     pillImg = img;
     refreshPill();
-    // Vị trí tính lại mỗi lần đặt, để nút bám theo ảnh khi cuộn
+    // Position is recalculated each time it is placed, so the button follows the image while scrolling
     const place = () => {
       const v = visibleRect(img);
       if (v.r - v.l < BTN_MIN || v.b - v.t < 40) return false;
@@ -969,21 +969,21 @@
     };
     const v = visibleRect(img);
     if (v.r - v.l < BTN_MIN || v.b - v.t < 40) { hidePill(); return; }
-    // Đang hiện đúng ảnh này: chỉ bám vị trí
+    // currently showing this image: only follow its position
     if (p._target === img && p.el._shown) { place(); return; }
-    // Đang chờ chuyển sang ảnh này: để hẹn giờ tự xử lý
+    // waiting to switch to this image: set a timer to handle it
     if (p._target === img && p._switchT) return;
     const wasShown = p.el._shown;
     p._target = img;
     clearTimeout(p._switchT);
     p._switchT = null;
     if (wasShown) {
-      // Chuyển sang ảnh khác: thu nhỏ/mờ nút ở ảnh cũ, rồi hiện lại (có hiệu ứng) ở ảnh mới
+      // Switching to another image: shrink and fade the button on the old image, then show it again (with animation) on the new image
       setBtnShown(p.el, false);
       p._switchT = setTimeout(() => {
         p._switchT = null;
         if (pillImg !== img) return;
-        // Phải hiện nút trước rồi mới đặt vị trí: khi đang ẩn, offsetWidth = 0 nên nút bị đẩy sang phải ra ngoài ảnh
+        // the button must be shown before its position is set: when hidden, offsetWidth = 0 and the button would be pushed outside the image
         setBtnShown(p.el, true);
         if (!place()) setBtnShown(p.el, false);
       }, 200);
@@ -1000,7 +1000,7 @@
     if (pill) setBtnShown(pill.el, false);
   }
 
-  // Tìm <img> đủ lớn nằm dưới con trỏ (kể cả khi bị lớp trong suốt của trang phủ lên)
+  // Find a large enough <img> under the cursor (even when covered by a transparent layer of the page)
   function imgAt(x, y) {
     for (const el of document.elementsFromPoint(x, y)) {
       if (el === pillHost) continue;
@@ -1013,7 +1013,7 @@
     if (force !== true) moveQueued = false;
     if (!pillsEnabled || lastX < 0) return;
     let img = imgAt(lastX, lastY);
-    if (img && (overlayEntries.has(imgKey(img)) || pendingUrls.has(imgKey(img)))) img = null; // ảnh đã dịch / đang dịch đã có nút cố định
+    if (img && (overlayEntries.has(imgKey(img)) || pendingUrls.has(imgKey(img)))) img = null; // already translated / being translated: it has a fixed button
     if (img) {
       clearTimeout(hideTimer);
       hideTimer = null;
@@ -1031,9 +1031,9 @@
     requestAnimationFrame(() => onMove());
   }, { capture: true, passive: true });
   document.addEventListener('mouseleave', () => { if (pillImg && !hideTimer) hideTimer = setTimeout(hidePill, HIDE_DELAY); });
-  // Nút không bám theo khi cuộn: ẩn đi, rê chuột lại sẽ hiện ở đúng chỗ mới
-  // Đang cuộn: nút ở yên trên ảnh dưới con trỏ, chỉ dời theo góc trên-phải phần ảnh đang thấy
-  // (ảnh khác trượt vào chỗ con trỏ thì nút chuyển sang ảnh đó)
+  // The button does not follow while scrolling: hide it; hover again to show it at the new position
+  // While scrolling: the button stays on the image under the cursor and only moves with the top-right corner of the visible part
+  // (if another image scrolls under the cursor, the button moves to that image)
   let scrollQueued = false;
   function onLayoutChange() {
     if (scrollQueued) return;
@@ -1043,7 +1043,7 @@
   window.addEventListener('scroll', onLayoutChange, true);
   window.addEventListener('resize', onLayoutChange);
 
-  // Cho phép tắt nút: chrome.storage.sync { showImageButton: false }
+  // Allow turning the button off: chrome.storage.sync { showImageButton: false }
   try {
     chrome.storage.sync.get({ showImageButton: true }).then((s) => { pillsEnabled = s.showImageButton !== false; });
     chrome.storage.onChanged.addListener((ch) => {
@@ -1055,9 +1055,9 @@
     });
   } catch (_) {}
 
-  // ================= Nút nổi bên phải, canh giữa theo chiều dọc =================
-  // Bấm: mở side panel (danh sách ảnh) như icon trên thanh công cụ; bấm lần nữa thì đóng.
-  // Tắt được bằng: chrome.storage.sync { showSideButton: false }
+  // ================= Floating button on the right side, vertically centered =================
+  // Click: opens the side panel (image list) like the toolbar icon; click again to close it.
+  // Can be turned off with: chrome.storage.sync { showSideButton: false }
   const DOCK_CSS = `
     .dock{position:fixed;right:0;top:50%;width:46px;height:48px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;
       padding:0 10px 0 6px;border:0;outline:0;border-radius:12px 0 0 12px;background:#fff;
@@ -1071,7 +1071,7 @@
   let dockHost = null;
   let dockBtn = null;
   let dockEnabled = true;
-  let panelOpen = false; // side panel đang mở: nút giữ nguyên vị trí như khi hover
+  let panelOpen = false; // side panel is open: the button keeps its position as when hovered
 
   function setDockOpen(on) {
     panelOpen = !!on;
@@ -1096,7 +1096,7 @@
     try { im.src = chrome.runtime.getURL('icons/icon48.png'); } catch (_) {}
     im.onerror = () => { im.remove(); btn.insertAdjacentHTML('afterbegin', ICON_SVG.replace('width="24" height="24"', 'width="28" height="28"')); };
     btn.appendChild(im);
-    // Không cho sự kiện lọt xuống trang
+    // Do not let the event reach the page
     for (const t of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'dblclick', 'contextmenu']) {
       btn.addEventListener(t, (e) => e.stopPropagation());
     }

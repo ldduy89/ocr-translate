@@ -1,7 +1,7 @@
-// Tài khoản: đăng nhập Google, lấy thông tin/lượt dịch/Gemini key từ server.
-// Nạp bằng importScripts trong background.js và bằng <script> trong popup.html.
+// Account: Google sign-in; fetches account info, credits and the Gemini key from the server.
+// Loaded with importScripts in background.js and with a <script> tag in popup.html.
 
-// Đổi thành địa chỉ server thật khi triển khai (https://...). Khi thử trên máy thì để localhost.
+// Change to the real server address when deploying (https://...). Keep localhost when testing locally.
 // const SERVER_URL = 'http://localhost:3000';
 const SERVER_URL = 'https://ddtechtrans.up.railway.app';
 
@@ -17,7 +17,7 @@ const Account = (() => {
     else await chrome.storage.local.remove(KEY);
   }
 
-  // Gọi server; trả về { status, data }. Lỗi mạng thì ném lỗi dễ hiểu.
+  // Call the server; returns { status, data }. Network errors throw a clear message.
   async function api(path, { method = 'GET', body, token } = {}) {
     const headers = {};
     if (body) headers['Content-Type'] = 'application/json';
@@ -40,13 +40,13 @@ const Account = (() => {
     return { status: res.status, data };
   }
 
-  // Token Google do Chrome cấp (tài khoản đang đăng nhập trong trình duyệt)
+  // Google token issued by Chrome (the account signed in to the browser)
   async function googleToken(interactive) {
     const r = await chrome.identity.getAuthToken({ interactive });
     return typeof r === 'string' ? r : r && r.token;
   }
 
-  // Cập nhật số lượt từ phản hồi của server: { credits, credits_free, credits_paid }
+  // Update credit counts from the server response: { credits, credits_free, credits_paid }
   async function patchCredits(data) {
     const acc = await load();
     if (acc && data && Number.isFinite(data.credits)) {
@@ -57,7 +57,7 @@ const Account = (() => {
     }
   }
 
-  // Đăng nhập: đổi token Google lấy phiên của server
+  // Sign in: exchange the Google token for a server session
   async function login(interactive = true) {
     let gt;
     try {
@@ -68,7 +68,7 @@ const Account = (() => {
     if (!gt) throw new Error('Không lấy được token Google.');
     const { status, data } = await api('/auth/google', { method: 'POST', body: { access_token: gt } });
     if (status !== 200) {
-      await chrome.identity.removeCachedAuthToken({ token: gt }).catch(() => {}); // token hỏng thì bỏ để lần sau lấy mới
+      await chrome.identity.removeCachedAuthToken({ token: gt }).catch(() => {}); // drop a broken token so a new one is fetched next time
       throw new Error(status === 401
         ? 'Server từ chối token Google (kiểm tra GOOGLE_CLIENT_ID ở server và client_id trong manifest).'
         : `Lỗi server (${status}).`);
@@ -78,7 +78,7 @@ const Account = (() => {
     return acc;
   }
 
-  // Cập nhật thông tin tài khoản (lượt còn lại, Gemini key). Phiên hết hạn thì đăng nhập lại im lặng.
+  // Refresh account info (remaining credits, Gemini key). If the session expired, sign in again silently.
   async function refresh() {
     const acc = await load();
     if (!acc) return null;
@@ -97,11 +97,11 @@ const Account = (() => {
     return next;
   }
 
-  // Dùng trước khi dịch: phải đăng nhập và có Gemini key
+  // Required before translating: must be signed in and have a Gemini key
   async function require() {
     const acc = await refresh();
     if (!acc) throw new Error('Hãy đăng nhập Google trong side panel để dịch.');
-    // Hết lượt thì key đã được thu hồi: báo đúng nguyên nhân thay vì báo đang chuẩn bị key
+    // Out of credits means the key was revoked: report the real cause instead of "preparing key"
     if (!(acc.user.credits > 0)) {
       throw new Error('Bạn đã hết lượt dịch. Vui lòng mua thêm lượt để tiếp tục.');
     }
@@ -111,7 +111,7 @@ const Account = (() => {
     return acc;
   }
 
-  // Trừ lượt trước khi gọi Gemini. Trả về ref để hoàn lượt nếu dịch không thành.
+  // Deduct credits before calling Gemini. Returns a ref to refund if translation fails.
   async function charge(count) {
     const acc = await require();
     const ref = crypto.randomUUID();
@@ -125,7 +125,7 @@ const Account = (() => {
     return ref;
   }
 
-  // Hoàn lượt (không ném lỗi: hoàn không được thì thôi, không làm hỏng luồng dịch)
+  // Refund credits (does not throw: if the refund fails, give up quietly without breaking the translation flow)
   async function refund(ref, count) {
     if (!ref || !(count >= 1)) return;
     try {
@@ -133,14 +133,14 @@ const Account = (() => {
       if (!acc) return;
       const { status, data } = await api('/usage/refund', { method: 'POST', token: acc.token, body: { ref, count } });
       if (status === 200) await patchCredits(data);
-    } catch { /* bỏ qua */ }
+    } catch { /* ignore */ }
   }
 
   async function logout() {
     try {
       const t = await googleToken(false);
       if (t) await chrome.identity.removeCachedAuthToken({ token: t });
-    } catch { /* bỏ qua */ }
+    } catch { /* ignore */ }
     await save(null);
   }
 
