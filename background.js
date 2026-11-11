@@ -135,8 +135,6 @@ const GEMINI_MODELS = [
   'gemini-3.1-flash-lite',
   'gemini-flash-lite-latest',
   'gemini-3.5-flash-lite',
-  'gemini-3-flash-preview',
-  'gemini-3.6-flash',
 ];
 const CYCLE_WAIT_MS = 10000;
 const MAX_CYCLES = 2;
@@ -147,8 +145,8 @@ async function getSavedModelIndex() {
 }
 
 // Call one model once; errors are thrown so the caller can switch to another model
-// Each request has a 40-second limit; on timeout, give up and switch to the next model (geminiRotate)
-const GEMINI_TIMEOUT_MS = 40000;
+// Each request has a 60-second limit; on timeout, give up and switch to the next model (geminiRotate)
+const GEMINI_TIMEOUT_MS = 60000;
 async function requestGemini(apiKey, model, body) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
   let res;
@@ -538,7 +536,11 @@ function rectsOf(raw) {
   const out = [];
   for (const bx of boxes) {
     if (!Array.isArray(bx)) continue;
-    const nums = bx.filter((v) => typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))));
+    const isNum = (v) => typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)));
+    let nums = bx.filter(isNum);
+    // The model sometimes appends the other fields into the array, e.g. [755,555,955,755,'ellipse',4,false,35]:
+    // when the first 4 items are numbers, take them as the box and ignore the rest
+    if (nums.length !== 4 && bx.length > 4 && bx.slice(0, 4).every(isNum)) nums = bx.slice(0, 4);
     if (nums.length !== 4) continue;
     out.push(nums.map(Number));
   }
@@ -607,8 +609,8 @@ function countReminder(n) {
   return `\n\nThis request contains exactly ${n} image${n === 1 ? '' : 's'}: labels "Image 0" to "Image ${n - 1}". The "images" array MUST have exactly ${n} entries, one for EVERY index from 0 to ${n - 1}. An image with no text at all (pure artwork, mostly black or empty, a cropped panel) STILL gets its own entry with an empty array, for example {"index":2,"summary":"pot on a table, no text","blocks":[]}. Never omit an entry because the image has nothing to translate.`;
 }
 
-const BATCH_MAX_IMAGES = 8; // small batch: lite models often return "no text" for the whole batch when the batch is large
-const PARALLEL_REQUESTS = 2; // number of requests running at the same time (Promise.all)
+const BATCH_MAX_IMAGES = 5; // small batch: lite models often return "no text" for the whole batch when the batch is large
+const PARALLEL_REQUESTS = 3; // number of requests running at the same time (Promise.all)
 const BATCH_PAUSE_MS = 3000; // pause after each group of requests before sending the next group
 const BATCH_MAX_BYTES = 10 * 1024 * 1024;
 const LAST_ROUND = 3; // round 1 for all images; rounds 2 and 3 only for images still empty or failed
@@ -1167,7 +1169,7 @@ Many pieces may contain no text at all (just artwork or empty space): that is no
 // Process several tall images: cut each into pieces and queue them. When TALL_BATCH_PIECES pieces are ready, send one request,
 // keep the remainder to combine with the next image. When all pieces of an image are done, call onDone(that image's result)
 // right away, without waiting for other images. Return [{ img, items, width, height, error }] in imgs order.
-const TALL_BATCH_PIECES = 8; // each request groups at most 8 tall-image pieces
+const TALL_BATCH_PIECES = 3; // each request groups at most 3 tall-image pieces
 async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
   // gi = the image's order in the whole run; piece labels are gi_i so the same piece always has the same label in every batch
   const recs = imgs.map((img, gi) => ({ img, gi, W: 0, H: 0, tiles: [], all: [], raw: [], error: null, pending: 0, result: null }));
