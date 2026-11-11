@@ -1,6 +1,6 @@
 importScripts('account.js');
 
-// Mở cài đặt bằng Side Panel khi bấm icon trên thanh công cụ, thay cho popup
+// Open settings in a Side Panel when the toolbar icon is clicked, instead of the popup
 chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true }).catch((err) => console.warn('[sidePanel]', err.message));
 
 const DEFAULTS = { targetLang: 'vi' };
@@ -9,7 +9,7 @@ async function getSettings() {
   return { ...DEFAULTS, ...(await chrome.storage.sync.get(DEFAULTS)) };
 }
 
-// ---------- Menu chuột phải ----------
+// ---------- Right-click menu ----------
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
@@ -22,8 +22,8 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === 'translate-image' && tab?.id) {
-    // Để trang xử lý như bấm icon trên ảnh (icon xoay ngay trên ảnh). Trang không nhận (không có thẻ <img>,
-    // chưa nạp content script...) thì dùng cách cũ: dịch và hiện bảng ở góc dưới phải
+    // Let the page handle it like clicking the icon on an image (the icon that rotates on the image). If the page does not respond (no <img> tag,
+    // content script not loaded...), fall back to the old method: translate and show a panel in the bottom-right corner
     chrome.tabs.sendMessage(tab.id, { type: 'MENU_TRANSLATE', srcUrl: info.srcUrl })
       .then((r) => { if (!r?.handled) runImageViewer(tab.id, info.srcUrl); })
       .catch(() => runImageViewer(tab.id, info.srcUrl));
@@ -31,7 +31,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 
-// ---------- Gemini: đọc và dịch bằng mô hình thị giác ----------
+// ---------- Gemini: read and translate with a vision model ----------
 const TARGET_NAMES = {
   'vi': 'Vietnamese',
   'en': 'English',
@@ -114,7 +114,7 @@ const TARGET_NAMES = {
   'la': 'Latin',
 };
 
-// Gemini key lấy từ tài khoản (server cấp). Account.require() đã làm mới thông tin trước khi dịch.
+// Gemini key comes from the account (issued by the server). Account.require() already refreshed the info before translating.
 async function getGeminiKey() {
   const key = await Account.geminiKey();
   if (!key) throw new Error('Chưa có key Gemini. Hãy đăng nhập trong side panel.');
@@ -130,7 +130,7 @@ function bytesToBase64(bytes) {
   return btoa(bin);
 }
 
-// Danh sách mô hình, thử lần lượt. Mô hình dùng được lần trước được nhớ để gọi trước lần sau.
+// Model list, tried in order. The model that worked last time is remembered and called first next time.
 const GEMINI_MODELS = [
   'gemini-3.1-flash-lite',
   'gemini-flash-lite-latest',
@@ -147,9 +147,9 @@ async function getSavedModelIndex() {
   return geminiModelIndex < GEMINI_MODELS.length ? geminiModelIndex : 0;
 }
 
-// Gọi một mô hình một lần; lỗi sẽ được ném ra để chuyển sang mô hình khác
-// Mỗi request tối đa 60 giây; quá thời gian thì bỏ và chuyển sang mô hình khác (geminiRotate)
-const GEMINI_TIMEOUT_MS = 60000;
+// Call one model once; errors are thrown so the caller can switch to another model
+// Each request has a 40-second limit; on timeout, give up and switch to the next model (geminiRotate)
+const GEMINI_TIMEOUT_MS = 40000;
 async function requestGemini(apiKey, model, body) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
   let res;
@@ -174,7 +174,7 @@ async function requestGemini(apiKey, model, body) {
   return (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
 }
 
-// Thử lần lượt các mô hình; parse(text) đọc kết quả, lỗi ở đây cũng chuyển sang mô hình khác
+// Try the models in order; parse(text) reads the result, and errors here also switch to the next model
 async function geminiRotate(apiKey, body, parse) {
   const start = await getSavedModelIndex();
   const errors = [];
@@ -207,7 +207,7 @@ function parseJsonText(text, model) {
   }
 }
 
-// Gọi cho một ảnh
+// Call for one image
 async function callGemini(apiKey, base64, mime, targetLang) {
   const target = TARGET_NAMES[targetLang] || targetLang;
   const prompt = `This image is a comic/manga page or a screenshot containing speech bubbles or caption text.
@@ -236,15 +236,15 @@ Return ONLY JSON in this form: {"blocks":[{"original":"...","translated":"...","
   return Array.isArray(parsed.blocks) ? parsed.blocks : [];
 }
 
-// Gemini có thể trả khung dạng [ymin, xmin, ymax, xmax] hoặc danh sách nhiều khung;
-// với nhiều khung thì gộp thành một khung bao tất cả
+// Gemini may return a box as [ymin, xmin, ymax, xmax] or a list of several boxes;
+// with several boxes, merge them into one box that encloses all of them
 function normalizeBox(raw) {
   if (!Array.isArray(raw) || !raw.length) return null;
   const boxes = Array.isArray(raw[0]) ? raw : [raw];
   let ymin = Infinity, xmin = Infinity, ymax = -Infinity, xmax = -Infinity;
   for (const bx of boxes) {
     if (!Array.isArray(bx)) continue;
-    // Model hay trả thêm phần tử không phải số (ví dụ "rect" sau toạ độ): chỉ giữ 4 số toạ độ
+    // The model often adds non-numeric items (e.g. "rect" after the coordinates): keep only the 4 coordinate numbers
     const nums = bx.filter((v) => typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))));
     if (nums.length !== 4) continue;
     const [a, b2, c, d] = nums.map((v) => Number(v));
@@ -257,13 +257,13 @@ function normalizeBox(raw) {
   return [ymin, xmin, ymax, xmax];
 }
 
-// Mốc chuẩn hoá: luôn dùng 1000 cho cả hai chiều
+// Normalization scale: always use 1000 for both axes
 function boxDenominators(blocks) {
   return { dx: 1000, dy: 1000 };
 }
 
-// Đổi danh sách khung từ Gemini thành items để phủ lên trang
-// Ghép kết quả Gemini với từng ảnh trong lô. Ưu tiên index; nếu index thiếu hoặc lệch thì theo thứ tự.
+// Convert the box list from Gemini into items to overlay on the page
+// Match Gemini results to each image in the batch. Use the index first; if the index is missing or wrong, fall back to order.
 function mapImageResults(result, count) {
   const list = Array.isArray(result.images) ? result.images : [];
   const byIndex = new Map();
@@ -271,7 +271,7 @@ function mapImageResults(result, count) {
     const idx = Number(e && e.index);
     if (Number.isInteger(idx) && idx >= 0 && idx < count) byIndex.set(idx, e.blocks || []);
   }
-  // Không đoán theo vị trí: ảnh nào Gemini không trả đúng số thứ tự thì trả về null để gửi lại riêng
+  // Don't guess by position: an image whose index Gemini did not return correctly gets null so it is re-sent alone
   const noIndexes = list.length === count && list.every((e) => e && e.index === undefined);
   return Array.from({ length: count }, (_, i) => {
     if (byIndex.has(i)) return byIndex.get(i);
@@ -280,8 +280,8 @@ function mapImageResults(result, count) {
   });
 }
 
-// Cỡ một dòng chữ gốc (px ảnh gốc) = cạnh dọc theo hướng xếp dòng / số dòng.
-// Chữ ngang: chia chiều cao khung cho số dòng; chữ dọc: chia chiều rộng cho số cột.
+// Size of one line of the original text (source-image px) = edge along the line direction / number of lines.
+// Horizontal text: divide box height by the number of lines; vertical text: divide box width by the number of columns.
 function linePitch(b, raw) {
   const n = Math.round(Number(b.lines));
   if (!Number.isFinite(n) || n < 1 || n > 30) return null;
@@ -290,15 +290,15 @@ function linePitch(b, raw) {
   return pitch >= 6 ? Math.round(pitch) : null;
 }
 
-// Đổi font_size của Gemini (thang 0-1000 theo chiều cao ảnh) sang px. Trả về null nếu vô lý.
+// Convert Gemini's font_size (0-1000 scale of image height) to px. Return null if the value is unreasonable.
 function fontPxFrom(b, H) {
   const f = Number(b.font_size);
   if (!Number.isFinite(f) || f < 5 || f > 400) return null;
   return (f / 1000) * H;
 }
 
-// Khung sát nét chữ thật: bao các điểm ảnh khác hẳn màu nền trong khung Gemini.
-// Khung Gemini thường rộng hơn chữ, nên đo trực tiếp trên ảnh cho cỡ chữ gốc chính xác hơn.
+// Tight box around the real text strokes: enclose the pixels inside the Gemini box that differ clearly from the background color.
+// The Gemini box is usually wider than the text, so measuring directly on the image gives a more accurate original text size.
 function inkBounds(data, W, raw, bg) {
   const x0 = Math.max(0, Math.floor(raw.x0)), x1 = Math.ceil(raw.x1);
   const y0 = Math.max(0, Math.floor(raw.y0)), y1 = Math.ceil(raw.y1);
@@ -322,20 +322,20 @@ function inkBounds(data, W, raw, bg) {
   return { x0: x0 + tx0, x1: x0 + tx1 + 1, y0: y0 + ty0, y1: y0 + ty1 + 1, count, area: w * h };
 }
 
-// Hai khung đã nới có thể đè lên nhau (hai bong bóng dính liền): cắt tại điểm giữa
-// khoảng trống giữa hai khung chữ gốc, không bao giờ cắt vào chữ gốc của chính khung đó
+// Two expanded boxes may overlap (two speech bubbles touching): cut at the midpoint
+// of the gap between the two original text boxes, never cutting into the original text of the box itself
 function avoidOverlap(items) {
   for (let i = 0; i < items.length; i++) {
     for (let j = i + 1; j < items.length; j++) {
       const a = items[i], b = items[j];
       if (!a.raw || !b.raw) continue;
-      if (a.fromBubble && b.fromBubble) continue; // khung bong bóng chính xác, không cần cắt
+      if (a.fromBubble && b.fromBubble) continue; // bubble box is accurate, no cut needed
       const A = a.box, B = b.box;
       if (A.x1 <= B.x0 || B.x1 <= A.x0 || A.y1 <= B.y0 || B.y1 <= A.y0) continue;
       const ra = a.raw, rb = b.raw;
       const gapY = Math.max(rb.y0 - ra.y1, ra.y0 - rb.y1);
       const gapX = Math.max(rb.x0 - ra.x1, ra.x0 - rb.x1);
-      if (gapY <= 0 && gapX <= 0) continue; // chữ gốc đã chồng nhau: không xử lý
+      if (gapY <= 0 && gapX <= 0) continue; // original text already overlaps: not processed
       if (gapY >= gapX) {
         const [up, down, rUp, rDown] = ra.y1 <= rb.y0 ? [a, b, ra, rb] : [b, a, rb, ra];
         const mid = (rUp.y1 + rDown.y0) / 2;
@@ -351,13 +351,13 @@ function avoidOverlap(items) {
   }
 }
 
-// Khi hai khối đè nhau (bubble với chữ gốc, bubble với bubble, sub với sub): co cả hai khối về SHRINK_SCALE quanh tâm.
-// Không dời khối, không cắt bubble.
-// Tỉ lệ co khi hai khối đè nhau (mặc định 90% kích thước gốc, chỉnh tại đây để test)
+// When two blocks overlap (bubble with text, bubble with bubble, sub with sub): shrink both toward the center by SHRINK_SCALE.
+// Do not move the blocks, do not cut bubbles.
+// Shrink ratio when two blocks overlap (default 90% of original size; adjust here for testing)
 const SHRINK_SCALE = 0.9;
-// Đè nhau ít (dưới OVERLAP_TOL phần diện tích của khung nhỏ hơn) thì chấp nhận, không co
+// Small overlap (below OVERLAP_TOL of the smaller box's area) is accepted, no shrinking
 const OVERLAP_TOL = 0.15;
-// Đè nhau trên mức này (bubble↔bubble hoặc sub↔sub) thì gộp hai khối thành một
+// Overlap above this level (bubble-bubble or sub-sub) merges the two blocks into one
 const MERGE_TOL = 0.7;
 function mergeItems(a, c) {
   const u = (p, q) => ({ x0: Math.min(p.x0, q.x0), y0: Math.min(p.y0, q.y0), x1: Math.max(p.x1, q.x1), y1: Math.max(p.y1, q.y1) });
@@ -370,7 +370,7 @@ function mergeItems(a, c) {
   if (a.inkBox && c.inkBox) a.inkBox = u(a.inkBox, c.inkBox);
   if (a.fontPx != null && c.fontPx != null) a.fontPx = Math.min(a.fontPx, c.fontPx);
   a.merged = true;
-  // Trạng thái co được tính lại từ khung mới
+  // Shrink state is recomputed from the new boxes
   a._s = 1;
   a._x0 = { ...a.box };
   a._b0 = a.bubbleRect ? { ...a.bubbleRect } : null;
@@ -383,7 +383,7 @@ function nudgeOverlaps(items, W, H) {
     Math.min(A.x1, B.x1) - Math.max(A.x0, B.x0) > 0 && Math.min(A.y1, B.y1) - Math.max(A.y0, B.y0) > 0;
   const bub = (it) => it.bubbleRect || it.box;
   const txt = (it) => it.raw || it.box;
-  // Tỉ lệ diện tích đè / diện tích khung nhỏ hơn
+  // Overlap area / area of the smaller box
   const overlapRatio = (A, B) => {
     const w = Math.min(A.x1, B.x1) - Math.max(A.x0, B.x0);
     const h = Math.min(A.y1, B.y1) - Math.max(A.y0, B.y0);
@@ -423,14 +423,14 @@ function nudgeOverlaps(items, W, H) {
         }
         if (!conflicts(a, c)) continue;
         for (const it of [a, c]) {
-          // Mỗi khối chỉ co một lần về SHRINK_SCALE so với gốc, không co dồn qua nhiều vòng
+          // Each block shrinks only once to SHRINK_SCALE relative to the original, no repeated shrinking over several passes
           if (it._s > SHRINK_SCALE) { setScale(it, SHRINK_SCALE); changed = true; }
         }
       }
     }
     if (!changed) break;
   }
-  // Log các cặp đang đè nhau sau khi co: % đè từng loại và tỉ lệ co của mỗi khối
+  // Log the overlapping pairs after shrinking: overlap % per type and the shrink ratio of each block
   const rows = [];
   for (let i = 0; i < items.length; i++) {
     for (let j = i + 1; j < items.length; j++) {
@@ -458,8 +458,8 @@ function nudgeOverlaps(items, W, H) {
   }
 }
 
-// Dựng một item từ khối Gemini. raw = khung chữ; bubble = khung bong bóng (mép ngoài) nếu có.
-// Có khung bong bóng thì dùng luôn, không đoán thêm; thiếu hoặc vô lý thì quay về cách cũ (nới theo màu nền).
+// Build one item from a Gemini block. raw = text box; bubble = bubble box (outer edge) if present.
+// If a bubble box exists, use it directly without guessing; if it is missing or unreasonable, fall back to the old method (expand by background color).
 function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
   const y0lim = clipY ? clipY.y0 : 0;
   const y1lim = clipY ? clipY.y1 : H;
@@ -479,9 +479,9 @@ function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
     bg = r.bg;
     box = { x0: r.box.x0, x1: r.box.x1, y0: Math.max(y0lim, r.box.y0), y1: Math.min(y1lim, r.box.y1) };
   }
-  // Vùng chữ gần như trống (không có nét chữ nào): khối bị gán nhầm sang ảnh này -> bỏ
+  // Text area is almost empty (no text strokes): the block was wrongly assigned to this image -> discard
   let ink = inkBounds(data, W, raw, bg);
-  // Vùng text_box không có nét chữ nhưng bong bóng thì có: Gemini đặt khung chữ lệch, dùng cả bong bóng
+  // Text box has no strokes but the bubble does: Gemini placed the text box off target, so use the whole bubble
   if (!ink && bubble) {
     const bb = { x0: Math.max(0, Math.floor(bubble.x0)), y0: Math.max(0, Math.floor(bubble.y0)), x1: Math.min(W, Math.ceil(bubble.x1)), y1: Math.min(H, Math.ceil(bubble.y1)) };
     const ink2 = inkBounds(data, W, bb, dominantColor(data, W, bb.x0, bb.y0, bb.x1, bb.y1));
@@ -493,14 +493,14 @@ function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
       ink = ink2;
     }
   }
-  // Chế độ chặt (chỉ dùng cho khối của vòng cuối, dễ bị model "bịa"): vùng chữ thật phải có nền khá đồng màu
-  // và có lượng nét chữ hợp lý; vùng tranh vẽ/nhiễu bị loại thay vì vẽ sub đè lên tranh.
+  // Strict mode (only for blocks in the last round, where the model is more likely to hallucinate): the real text area must have a fairly uniform background color
+  // and a reasonable amount of text strokes; drawing/noise areas are dropped instead of drawing a sub over the artwork.
   if (strict && ink && (bg.frac < 0.35 || ink.count / ink.area < 0.015)) {
     console.warn('[OCR] bỏ khối (vòng kiểm tra lại): vùng này không giống chữ trong bong bóng (vòng cuối)', { original: b.original, bgFrac: bg.frac, inkRatio: ink.count / ink.area });
     return null;
   }
-  // Chữ chỉ có dấu chấm/ba chấm (ví dụ "....") có rất ít nét nên không qua được kiểm tra nét.
-  // Với loại này vẫn giữ khối, dùng chính khung text_box để đo khoảng dòng.
+  // Text made only of dots/ellipses (e.g. "....") has very few strokes, so it does not pass the stroke check.
+  // For this type the block is kept, and the text box itself is used to measure line spacing.
   const punctOnly = /^[\s.,…·!?~\-]+$/.test(String(b.original || ''));
   if (!punctOnly && (!ink || ink.count < Math.max(20, ink.area * 0.001))) {
     console.warn('[OCR] bỏ khối: không thấy nét chữ trong vùng text_box', { original: b.original, raw, bg, ink });
@@ -511,15 +511,15 @@ function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
     box, conf: 100, original: b.original || '', translated: b.translated, bg, raw,
     fromBubble, shape: ellipse ? 'ellipse' : 'rect',
     linePx: linePitch(b, ink || box),
-    // font_size của Gemini tính theo chiều cao của đoạn ảnh đang gửi (khi cắt ảnh dài là đoạn, không phải cả ảnh)
+    // Gemini's font_size is relative to the height of the image piece being sent (for a tall image, the piece, not the whole image)
     fontPx: fontPxFrom(b, clipY ? clipY.y1 - clipY.y0 : H),
     inkBox: ink ? { x0: ink.x0, y0: ink.y0, x1: ink.x1, y1: ink.y1 } : null,
     bubbleRect: bubble ? { x0: bubble.x0, y0: bubble.y0, x1: bubble.x1, y1: bubble.y1 } : null,
   };
 }
 
-// Hình dạng khung: ưu tiên trường shape. Nếu trường đó thiếu hoặc không hợp lệ thì lấy phần tử
-// 'ellipse'/'rect' mà model lỡ đặt trong mảng toạ độ. Không có thì trả về '' (xử lý như bình thường).
+// Shape: prefer the shape field. If it is missing or invalid, take the
+// 'ellipse'/'rect' value the model accidentally put in the coordinate array. If neither exists, return '' (process as normal).
 function shapeOf(b) {
   const s = String(b.shape || '').trim().toLowerCase();
   if (s === 'ellipse' || s === 'rect') return s;
@@ -531,8 +531,8 @@ function shapeOf(b) {
   return '';
 }
 
-// Đọc khung chữ và khung bong bóng của một khối (chuẩn hoá 0-1000)
-// Danh sách các khung [ymin, xmin, ymax, xmax] trong một trường box (bỏ phần tử không phải số)
+// Read the text box and bubble box of one block (normalized 0-1000)
+// List of boxes [ymin, xmin, ymax, xmax] in one box field (non-numeric items dropped)
 function rectsOf(raw) {
   if (!Array.isArray(raw) || !raw.length) return [];
   const boxes = Array.isArray(raw[0]) ? raw : [raw];
@@ -546,8 +546,8 @@ function rectsOf(raw) {
   return out;
 }
 
-// Chỉ lấy khung đầu tiên của mỗi trường (bubble_box, text_box). Khi model trả nhiều khung trong một khối
-// thì bỏ qua các khung sau, không gộp.
+// Take only the first box of each field (bubble_box, text_box). When the model returns several boxes in one block
+// the later ones are ignored, not merged.
 function blockBoxes(b) {
   const bubbleNb = rectsOf(b.bubble_box)[0] || rectsOf(b.box)[0] || null;
   const textNb = rectsOf(b.text_box)[0] || bubbleNb;
@@ -584,7 +584,7 @@ function itemsFromBlocks(blocks, bitmap, strict) {
   return items;
 }
 
-// Ảnh gần như một màu (khoảng đen/trắng ngăn cách): không cần gửi cho Gemini
+// Image that is almost one color (black/white separator): no need to send to Gemini
 function isBlankBitmap(bmp) {
   const w = 256;
   const h = Math.max(8, Math.min(2400, Math.round((w * bmp.height) / bmp.width)));
@@ -603,19 +603,19 @@ function isBlankBitmap(bmp) {
   return diff < 6;
 }
 
-// Nhắc cứng số lượng ảnh để Gemini không bỏ qua ảnh không có chữ
+// Hard-state the number of images so Gemini does not skip images without text
 function countReminder(n) {
   return `\n\nThis request contains exactly ${n} image${n === 1 ? '' : 's'}: labels "Image 0" to "Image ${n - 1}". The "images" array MUST have exactly ${n} entries, one for EVERY index from 0 to ${n - 1}. An image with no text at all (pure artwork, mostly black or empty, a cropped panel) STILL gets its own entry with an empty array, for example {"index":2,"summary":"pot on a table, no text","blocks":[]}. Never omit an entry because the image has nothing to translate.`;
 }
 
-const BATCH_MAX_IMAGES = 8; // lô nhỏ: model lite hay trả "no text" hàng loạt khi lô lớn
-const PARALLEL_REQUESTS = 2; // số request chạy đồng thời (Promise.all)
-const BATCH_PAUSE_MS = 3000; // nghỉ sau mỗi nhóm request rồi mới gửi nhóm kế
+const BATCH_MAX_IMAGES = 8; // small batch: lite models often return "no text" for the whole batch when the batch is large
+const PARALLEL_REQUESTS = 2; // number of requests running at the same time (Promise.all)
+const BATCH_PAUSE_MS = 3000; // pause after each group of requests before sending the next group
 const BATCH_MAX_BYTES = 10 * 1024 * 1024;
-const LAST_ROUND = 3; // vòng 1 cho tất cả ảnh, vòng 2 và 3 chỉ cho ảnh còn rỗng hoặc lỗi
+const LAST_ROUND = 3; // round 1 for all images; rounds 2 and 3 only for images still empty or failed
 
-// Tải ảnh thành Blob. Ảnh blob: chỉ đọc được trong trang tạo ra nó,
-// nên nhờ content script đọc giúp rồi gửi về dưới dạng data URL.
+// Load an image as a Blob. Blob images can only be read in the page that created them,
+// so ask the content script to read them and send back a data URL.
 async function loadImageBlob(tabId, srcUrl) {
   if (srcUrl.startsWith('blob:')) {
     if (tabId == null) throw new Error('Thiếu tab để đọc ảnh blob:');
@@ -630,8 +630,8 @@ async function loadImageBlob(tabId, srcUrl) {
   return await res.blob();
 }
 
-// Dịch tất cả ảnh: gửi nhiều ảnh trong một yêu cầu, chia lô khi quá nhiều hoặc quá nặng
-// Dữ liệu block gốc Gemini trả về cho từng ảnh (url -> blocks), dùng để log khi kết thúc
+// Translate all images: send several images in one request, split into batches when there are too many or they are too heavy
+// Raw Gemini block data returned for each image (url -> blocks), used for logging at the end
 let geminiReport = new Map();
 
 async function translateAllGemini(tabId, urls, stats = { drawn: 0 }) {
@@ -680,20 +680,20 @@ In "summary", write 3-8 words describing what THAT specific image shows (e.g. "w
 Many consecutive images may contain no text at all (just artwork or empty space): that is normal. Return an empty "blocks" array for them. NEVER move text from one image to another to fill a gap, and never shift blocks to the previous or next image. A block belongs only to the image where its text is actually printed, and its boxes are relative to that image.`;
 
   let ok = 0;
-  // Cập nhật tiến độ lên panel trong trang mỗi khi vẽ xong một ảnh
+  // Update progress on the in-page panel each time an image is drawn
   const progress = () => {
-    stats.drawn = ok; // translateAll dùng số này để hoàn lượt cho ảnh không dịch được
+    stats.drawn = ok; // translateAll uses this number to refund quota for images that could not be translated
     notify(tabId, { type: 'SHOW_INFO', text: `Đang dịch: ${ok}/${list.length} ảnh...` });
   };
   progress();
-  const undrawn = []; // ảnh có khối từ model nhưng không vẽ được
-  const drawn = new Set(); // URL ảnh đã vẽ được ít nhất một khối
-  const batchErrors = []; // ảnh thuộc lô vòng 1 bị lỗi yêu cầu
-  const tallErrors = []; // ảnh rất cao bị lỗi
-  const tallEmpty = []; // ảnh rất cao model không trả khối nào
+  const undrawn = []; // images that have blocks from the model but could not be drawn
+  const drawn = new Set(); // URL of images where at least one block was drawn
+  const batchErrors = []; // images in a round-1 batch that failed with a request error
+  const tallErrors = []; // tall images that errored
+  const tallEmpty = []; // tall images where the model returned no blocks
   const RECHECK_HINT = 'Some of these images were reported as having no text in a previous pass. Check each one again. Return blocks only for text that is actually printed in THAT image, with exact boxes; do not guess or invent text. If an image truly has no readable text, return an empty "blocks" array for it.';
 
-  // Gửi một nhóm ảnh trong một yêu cầu; trả về mảng blocks theo từng ảnh (null = thiếu)
+  // Send one group of images in one request; return a blocks array per image (null = missing)
   const askBatch = async (imgs, hint) => {
     const parts = [{ text: prompt + countReminder(imgs.length) + (hint ? '\n' + hint : '') }];
     for (let i = 0; i < imgs.length; i++) {
@@ -709,12 +709,12 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     return mapImageResults(result, imgs.length);
   };
 
-  // Dựng khung và vẽ bản dịch cho một ảnh
+  // Build the boxes and draw the translation for one image
   const showBlocks = async (img, blocks, canRecheck, round = 1) => {
     geminiReport.set(img.srcUrl, blocks);
     const bitmap = await createImageBitmap(img.blob);
     try {
-      let items = itemsFromBlocks(blocks, bitmap, round === LAST_ROUND); // chỉ kiểm tra chặt ở vòng cuối
+      let items = itemsFromBlocks(blocks, bitmap, round === LAST_ROUND); // strict check only in the last round
       console.log(`[OCR] vòng ${round}: ${blocks.length} khối -> vẽ ${items.length}`, img.srcUrl);
       if (items.length && !cancelCheck()) {
         notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width: bitmap.width, height: bitmap.height, items });
@@ -723,9 +723,9 @@ Many consecutive images may contain no text at all (just artwork or empty space)
         drawn.add(img.srcUrl);
         await markDone(tabId, img.srcUrl);
       } else if (blocks.length && !cancelCheck()) {
-        // Model có trả khối nhưng không khối nào vẽ được: ghi lại để xem trong log
+        // Model returned blocks but none could be drawn: record it for the log
         undrawn.push({ url: img.srcUrl, blocks: blocks.length, round });
-        // Không vẽ được khối nào thì coi như không có chữ: bỏ chọn và khoá trong side panel
+        // If no block could be drawn, treat the image as having no text: deselect it and lock it in the side panel
         await markState(tabId, 'noText', img.srcUrl);
         console.warn(`[OCR] ảnh không vẽ được khối nào (vòng ${round}, ${blocks.length} khối)`, img.srcUrl);
       }
@@ -734,13 +734,13 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     }
   };
 
-  // Vòng 1: gửi theo lô, vẽ ngay những ảnh đã có chữ. Ảnh trả rỗng/thiếu bị nghi
-  // (model lite hay gán "no text" nhầm) -> gom lại để hỏi tiếp ở vòng 2.
-  // Gửi các lô theo nhóm PARALLEL_REQUESTS request cùng lúc (Promise.all). Xong một nhóm thì xử lý kết quả,
-  // nghỉ BATCH_PAUSE_MS rồi mới gửi nhóm kế.
+  // Round 1: send in batches and draw images that already have text right away. Images returned empty or missing
+  // (lite models often wrongly assign "no text") are collected to be asked again in round 2.
+  // Send batches in groups of PARALLEL_REQUESTS requests at once (Promise.all). After a group finishes, process its results,
+  // pause BATCH_PAUSE_MS, then send the next group.
   const askParallel = async (groups, hint, onResults) => {
     for (let k = 0; k < groups.length; k += PARALLEL_REQUESTS) {
-      if (stopRequested()) break; // đã hủy hoặc máy chủ bận: không gửi thêm request
+      if (stopRequested()) break; // stopped (cancelled or server busy): do not send more requests
       const part = groups.slice(k, k + PARALLEL_REQUESTS);
       const res = await Promise.all(part.map((g) =>
         askBatch(g, hint).then((perImage) => ({ g, perImage }), (err) => ({ g, err }))
@@ -750,7 +750,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     }
   };
 
-  // Chia ảnh thành các lô theo số lượng và dung lượng
+  // Split images into batches by count and size
   const makeGroups = (imgs) => {
     const groups = [];
     let cur = [], curBytes = 0;
@@ -767,9 +767,9 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     return groups;
   };
 
-  // Một vòng gửi lại theo lô. Trả về:
-  // empty: ảnh model đã trả lời nhưng không có khối nào (hoặc thiếu trong kết quả)
-  // failed: ảnh có yêu cầu bị lỗi (mạng, quota, JSON hỏng), không tính vào ngưỡng
+  // One recheck round, sent in batches. Returns:
+  // empty: images the model answered but returned no blocks for (or that are missing from the result)
+  // failed: images whose request errored (network, quota, broken JSON); not counted toward the threshold
   const runRecheckRound = async (imgs, round) => {
     const empty = [], failed = [];
     await askParallel(makeGroups(imgs), RECHECK_HINT, async (res) => {
@@ -790,15 +790,15 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     return { empty, failed };
   };
 
-  // Xử lý đúng thứ tự trong danh sách ảnh (từ trên xuống dưới): chia thành các đoạn liên tiếp,
-  // mỗi đoạn hoặc toàn ảnh thường (gửi theo lô) hoặc toàn ảnh dài (cắt đoạn). Xong đoạn này mới sang đoạn sau.
-  // Ảnh bị nghi rỗng được hỏi lại ngay trong đoạn của nó, để bản dịch không bị vẽ lệch thứ tự.
+  // Round 1 covers all images in list order: normal images are sent in batches, tall images are cut into pieces and sent in batches.
+  // Images that come back empty are not rechecked here; they are rechecked in rounds 2 and 3 below.
+  // Drawing order no longer depends on the image type.
   let emptyImgs = [];
   let failedImgs = [];
 
-  // Máy chủ quá tải (503/429): chỉ báo một lần trong lượt dịch, bảo người dùng đợi rồi dịch lại
+  // Server overloaded (503/429): report only once per run, and tell the user to wait and retry
   const isBusyError = (err) => /HTTP (503|429)|high demand|quá tải/i.test(String(err && err.message || err));
-  // Gặp 503/429: dừng ngay, báo một lần
+  // On 503/429: stop immediately and report once
   const notifyBusyOnce = (err) => {
     console.error('[OCR] lô Gemini lỗi', err);
     if (!isBusyError(err) || busyStopped) return;
@@ -806,7 +806,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     notify(tabId, { type: 'SHOW_ERROR', error: 'Máy chủ đang bận, vui lòng đợi một chút rồi dịch lại.' });
   };
 
-  // Ảnh dài đã xong hết các đoạn: vẽ theo toạ độ ảnh gốc
+  // Tall image has finished all its pieces: draw it using original-image coordinates
   const onTallDone = async (r) => {
     const img = r.img;
     if (r.error) {
@@ -824,7 +824,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     }
   };
 
-  // Ảnh thường: vẽ bằng showBlocks như trước. Ảnh model trả rỗng được hỏi lại ở các vòng sau.
+  // Normal image: draw with showBlocks as before. Images the model returns empty for are rechecked in later rounds.
   const onWholeDone = async (r) => {
     const img = r.img;
     if (r.error) {
@@ -837,7 +837,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     }
   };
 
-  // Một luồng cho mọi ảnh: gom lô chung, kết quả chuyển đúng hàm xử lý theo loại ảnh
+  // One flow for all images: batch them together, route each result to the handler for its image type
   const onImageDone = (r) => (r.whole ? onWholeDone(r) : onTallDone(r));
   await geminiTallBatch(loaded.filter((x) => !x.blank), apiKey, targetLang, onImageDone);
 
@@ -848,7 +848,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     ({ empty: emptyImgs, failed: failedImgs } = await runRecheckRound(work, round));
   }
 
-  // Tổng kết: mỗi ảnh nằm trong đúng một nhóm
+  // Summary: each image falls into exactly one group
   const loadedUrls = new Set(loaded.map((x) => x.srcUrl));
   const notDrawn = (arr) => [...new Set(arr.map((x) => (typeof x === 'string' ? x : x.srcUrl)))].filter((u) => !drawn.has(u));
   const groups = [
@@ -860,7 +860,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     ['ảnh rất cao: lỗi', notDrawn(tallErrors)],
     ['không tải được ảnh', list.filter((u) => !loadedUrls.has(u))],
   ];
-  // Đã hủy: ảnh chưa dịch không phải là ảnh không có chữ, không khoá chúng
+  // Cancelled: unfinished images are not "no text" images, so do not lock them
   if (!stopRequested()) {
     for (const u of [...groups[1][1], ...groups[3][1], ...groups[4][1]]) await markState(tabId, 'noText', u);
   }
@@ -872,7 +872,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
   }
   if (drawn.size + sumGroups !== list.length) console.warn('[OCR] còn ảnh chưa phân loại:', list.length - drawn.size - sumGroups);
   console.groupEnd();
-  // Dữ liệu block Gemini theo từng link ảnh (ảnh cao: _piece là nhãn đoạn, toạ độ theo đoạn đó)
+  // Raw Gemini block data per image link (tall images: _piece is the piece label, coordinates relative to that piece)
   console.groupCollapsed(`[OCR] DỮ LIỆU GEMINI theo link ảnh (${geminiReport.size} ảnh)`);
   for (const [url, blocks] of geminiReport) {
     console.groupCollapsed(`${url} — ${blocks.length} khối`);
@@ -894,9 +894,9 @@ Many consecutive images may contain no text at all (just artwork or empty space)
   notify(tabId, { type: 'SHOW_INFO', text: `Đã dịch ${ok}/${list.length} ảnh.` });
 }
 
-// Màu nền quanh khung, dùng để phủ bản dịch
-// ---------- Lấy màu nền bong bóng và canh khung theo đúng vùng bong bóng ----------
-// Màu nền = màu chiếm nhiều nhất bên trong khung (chữ thường là phần ít hơn), thay vì trung bình vùng xung quanh
+// Background color around the box, used to cover the original text with the translation
+// ---------- Get bubble background color and align the box to the bubble area ----------
+// Background color = most common color inside the box (text is the minority), instead of the average of the surrounding area
 function dominantColor(data, W, x0, y0, x1, y1) {
   const hist = new Map();
   const step = 2;
@@ -918,8 +918,8 @@ function dominantColor(data, W, x0, y0, x1, y1) {
   return { r, g, b, dark: 0.299 * r + 0.587 * g + 0.114 * b < 128, frac: best.n / Math.max(1, total) };
 }
 
-// Mở rộng từng cạnh của khung ra ngoài khi dòng/cột kế bên vẫn là màu nền bong bóng,
-// để khung bao trọn bong bóng thay vì chỉ phần chữ (Gemini thường trả khung hơi nhỏ hoặc lệch)
+// Extend each edge of the box outward while the adjacent row/column is still bubble background color,
+// so the box covers the whole bubble instead of only the text (Gemini often returns a box that is slightly small or off)
 function snapToBubble(data, W, H, box, bg) {
   const isBg = (x, y) => {
     const o = (y * W + x) * 4;
@@ -936,17 +936,17 @@ function snapToBubble(data, W, H, box, bg) {
     return n / Math.max(1, y1 - y0);
   };
   const w = box.x1 - box.x0, h = box.y1 - box.y0;
-  // Giới hạn mở rộng rộng rãi; dừng ở khoảng đen giữa các bong bóng nên không tràn sang khung khác
+  // Wide extension limit; stop at the black gap between bubbles so it does not spill into other boxes
   const grow = Math.min(600, Math.max(200, Math.round(0.8 * Math.max(w, h))));
   const L = Math.max(0, box.x0 - grow), R = Math.min(W, box.x1 + grow);
   const T = Math.max(0, box.y0 - grow), B = Math.min(H, box.y1 + grow);
   const out = { ...box };
-  const TH = 0.15; // dòng có chữ dày vẫn còn nhiều màu nền; khoảng đen ngoài bong bóng thì gần 0
+  const TH = 0.15; // a row with dense text still has many background-colored pixels; the black gap outside a bubble is nearly 0
   while (out.y0 - 1 >= T && rowFrac(out.y0 - 1, out.x0, out.x1) >= TH) out.y0--;
   while (out.y1 + 1 <= B - 1 && rowFrac(out.y1, out.x0, out.x1) >= TH) out.y1++;
   while (out.x0 - 1 >= L && colFrac(out.x0 - 1, out.y0, out.y1) >= TH) out.x0--;
   while (out.x1 + 1 <= R - 1 && colFrac(out.x1, out.y0, out.y1) >= TH) out.x1++;
-  // Thu lại các cạnh đang nằm trên khoảng đen hoàn toàn (khung Gemini vẽ quá tay)
+  // Pull back edges that lie entirely on the black gap (Gemini drew the box too generously)
   while (out.y1 - out.y0 > 8 && rowFrac(out.y1 - 1, out.x0, out.x1) === 0) out.y1--;
   while (out.y1 - out.y0 > 8 && rowFrac(out.y0, out.x0, out.x1) === 0) out.y0++;
   while (out.x1 - out.x0 > 8 && colFrac(out.x1 - 1, out.y0, out.y1) === 0) out.x1--;
@@ -954,26 +954,26 @@ function snapToBubble(data, W, H, box, bg) {
   return out;
 }
 
-// Từ khung Gemini (đã đổi ra toạ độ pixel) -> khung đã canh + màu nền
+// From the Gemini box (converted to pixel coordinates) -> aligned box + background color
 function analyzeBox(data, W, H, box) {
   const x0 = Math.max(0, Math.floor(box.x0)), y0 = Math.max(0, Math.floor(box.y0));
   const x1 = Math.min(W, Math.ceil(box.x1)), y1 = Math.min(H, Math.ceil(box.y1));
   const bg = dominantColor(data, W, x0, y0, x1, y1);
-  // Nền tối thường là khoảng đen giữa các khung truyện: không mở rộng để tránh nuốt tranh
+  // A dark background is usually the black gap between comic panels: do not extend, to avoid swallowing artwork
   const snapped = bg.dark ? { x0, y0, x1, y1 } : snapToBubble(data, W, H, { x0, y0, x1, y1 }, bg);
   return { box: snapped, bg };
 }
 
-// ---------- Ảnh cao (> 6000px): chia đoạn đều nhau, mỗi đoạn không quá 6000px ----------
-// Bật/tắt việc cắt ảnh cao (ảnh > TALL_LIMIT được cắt thành đoạn)
+// ---------- Tall image: split into equal pieces, each piece no larger than the limit ----------
+// Enable/disable cutting tall images (images > TALL_LIMIT are cut into pieces)
 const SPLIT_TALL_IMAGES = true;
-const TALL_LIMIT = 4000; // ảnh cao hơn mức này mới bị cắt
-const TILE_MAX = 4000;   // mỗi đoạn tối đa 4000px; cứ thêm mỗi 4000px thì thêm một đoạn
-const CUT_SEARCH = 600;  // tìm dòng cắt trong khoảng +-600px quanh điểm giữa
+const TALL_LIMIT = 4000; // only tall images taller than this are cut
+const TILE_MAX = 4000;   // each piece is at most TILE_MAX px; add one piece for every additional TILE_MAX px
+const CUT_SEARCH = 600;  // search for the cut line within +-600px of the midpoint
 
-// Tìm dòng cắt an toàn trong [lo, hi], ưu tiên gần `target`: khoảng trống đồng màu giữa các khung,
-// không có nét chữ hay viền bong bóng đi ngang. Chấm điểm cả một dải 7 dòng quanh dòng cắt
-// để tránh cắt sát mép chữ hoặc mép bong bóng.
+// Find a safe cut line in [lo, hi], preferring a row near `target`: a uniform-color gap between boxes,
+// with no text strokes or bubble edges crossing it. Score a band of 7 rows around the cut line
+// to avoid cutting right at the edge of text or a bubble.
 function findCutRow(img, W, lo, hi, target) {
   const H = img.length / (W * 4);
   const lum = (x, y) => {
@@ -1010,7 +1010,7 @@ function findCutRow(img, W, lo, hi, target) {
   return best;
 }
 
-// Cắt một ảnh thành các đoạn JPEG. Chỉ giữ các đoạn đã nén; bản pixel của cả ảnh được giải phóng ngay sau khi cắt.
+// Cut one image into JPEG pieces. Keep only the compressed pieces; the full-image pixels are released right after cutting.
 async function cutToTiles(blob, mime) {
   const bitmap = await createImageBitmap(blob);
   const W = bitmap.width;
@@ -1023,13 +1023,13 @@ async function cutToTiles(blob, mime) {
   full.getContext('2d', { willReadFrequently: true }).drawImage(bitmap, 0, 0);
   bitmap.close();
   const img = full.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
-  // Số đoạn: cứ mỗi TILE_MAX px thì thêm một đoạn (mỗi đoạn luôn <= TILE_MAX)
+  // Number of pieces: add one piece for every TILE_MAX px (each piece is always <= TILE_MAX)
   const n = Math.floor(H / TILE_MAX) + 1;
   const cuts = [0];
   for (let i = 1; i < n; i++) {
     const prev = cuts[cuts.length - 1];
     const target = Math.round((H * i) / n);
-    // Đoạn hiện tại <= TILE_MAX, và phần còn lại vẫn chia được cho (n - i) đoạn <= TILE_MAX
+    // The current piece <= TILE_MAX, and the remainder can still be split into (n - i) pieces <= TILE_MAX
     const lo = Math.max(prev + 1, target - CUT_SEARCH, H - (n - i) * TILE_MAX);
     const hi = Math.min(H - 1, target + CUT_SEARCH, prev + TILE_MAX);
     cuts.push(findCutRow(img, W, Math.min(lo, hi), hi, target));
@@ -1047,7 +1047,7 @@ async function cutToTiles(blob, mime) {
   return { W, H, tiles };
 }
 
-// Đổi khung của một đoạn về toạ độ ảnh gốc. Chỉ đọc pixel của đúng đoạn đó, không cần cả ảnh.
+// Convert a piece's boxes back to original-image coordinates. Reads only the pixels of that piece, not the whole image.
 async function itemsFromTileLocal(blocks, tile, W) {
   if (!blocks.length) return [];
   const bmp = await createImageBitmap(tile.blob);
@@ -1076,12 +1076,12 @@ async function itemsFromTileLocal(blocks, tile, W) {
       console.warn('[OCR] bỏ khối: buildItem không tạo khung', { original: b.original, raw, bubble: bubbleNb });
       continue;
     }
-    // Gemini trả nhiều bubble_box cho một khối = khối gộp nhiều bong bóng: vẫn vẽ, nhưng không đo độ lệch
+    // Gemini returned several bubble_box for one block = the block merged several bubbles: still draw it, but do not measure the offset
     it.merged = rectsOf(b.bubble_box).length > 1;
     items.push(it);
   }
   console.log(`[TILE] đoạn ${tile.y0}..${tile.y0 + H}: ${blocks.length} khối -> vẽ ${items.length}`);
-  // Đổi từ toạ độ trong đoạn sang toạ độ ảnh gốc
+  // Convert from piece coordinates to original-image coordinates
   for (const it of items) {
     it.box.y0 += tile.y0;
     it.box.y1 += tile.y0;
@@ -1096,11 +1096,11 @@ async function itemsFromTileLocal(blocks, tile, W) {
       it.bubbleRect.y1 += tile.y0;
     }
   }
-  // Log độ lệch: chữ gốc (nét chữ thật) so với khung sub sẽ vẽ. dx/dy > 0 nghĩa là sub nằm bên phải/dưới chữ gốc.
+  // Offset log: real text strokes vs the sub box to be drawn. dx/dy > 0 means the sub lies right/below the original text.
   return items;
 }
 
-// Bỏ khung trùng ở vùng chồng nhau giữa hai đoạn
+// Remove duplicate boxes in the overlap zone between two pieces
 function dedupeItems(items) {
   const out = [];
   for (const it of items) {
@@ -1116,10 +1116,10 @@ function dedupeItems(items) {
   return out;
 }
 
-// Gửi nhiều đoạn của cùng một ảnh trong một yêu cầu, mỗi đoạn có nhãn thứ tự
-// Gửi nhiều đoạn (của một hoặc nhiều ảnh) trong một yêu cầu. Nhãn mỗi đoạn: "k_i":
-// k là số thứ tự ảnh trong lô, i là thứ tự đoạn trong ảnh đó (từ trên xuống). Trả về Map nhãn -> blocks;
-// nhãn nào model không trả về thì không có trong Map (để gửi lại riêng).
+// Send several pieces of the same image in one request, each piece with an order label
+// Send several pieces (of one or more images) in one request. Each piece label is "k_i":
+// k is the image's order in the batch, i is the piece's order within that image (top to bottom). Return a Map label -> blocks;
+// labels the model does not return are not in the Map (so they are re-sent alone).
 async function callGeminiPieces(apiKey, pieces, targetLang) {
   const target = TARGET_NAMES[targetLang] || targetLang;
   const labels = pieces.map((p) => p.label);
@@ -1165,15 +1165,15 @@ Many pieces may contain no text at all (just artwork or empty space): that is no
   return out;
 }
 
-// Xử lý nhiều ảnh dài: cắt từng ảnh rồi xếp các đoạn vào hàng chờ. Đủ TALL_BATCH_PIECES đoạn thì gửi một yêu cầu,
-// phần dư giữ lại để ghép với ảnh kế tiếp. Khi tất cả đoạn của một ảnh đã xong thì gọi onDone(kết quả của ảnh đó)
-// ngay, không đợi các ảnh khác. Trả về [{ img, items, width, height, error }] theo đúng thứ tự imgs.
-const TALL_BATCH_PIECES = 8; // mỗi request gom tối đa 8 đoạn ảnh dài
+// Process several tall images: cut each into pieces and queue them. When TALL_BATCH_PIECES pieces are ready, send one request,
+// keep the remainder to combine with the next image. When all pieces of an image are done, call onDone(that image's result)
+// right away, without waiting for other images. Return [{ img, items, width, height, error }] in imgs order.
+const TALL_BATCH_PIECES = 8; // each request groups at most 8 tall-image pieces
 async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
-  // gi = số thứ tự ảnh trong cả lượt dịch; nhãn đoạn là gi_i nên cùng một đoạn luôn có cùng nhãn ở mọi lô
+  // gi = the image's order in the whole run; piece labels are gi_i so the same piece always has the same label in every batch
   const recs = imgs.map((img, gi) => ({ img, gi, W: 0, H: 0, tiles: [], all: [], raw: [], error: null, pending: 0, result: null }));
 
-  // Ảnh đã xong hết đoạn: gom kết quả, gọi onDone để vẽ ngay
+  // Image has all pieces done: gather the result and call onDone to draw it right away
   const finishRec = async (rec) => {
     if (rec.result) return;
     if (rec.error) {
@@ -1189,7 +1189,7 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
     if (onDone) await onDone(rec.result);
   };
 
-  // Gửi một lô đoạn trong một yêu cầu; đoạn nào model không trả về thì gửi lại riêng
+  // Send one batch of pieces in one request; any piece the model does not return is re-sent alone
   const flush = async (batch) => {
     const live = batch.filter((p) => !p.rec.error);
     if (live.length) {
@@ -1224,7 +1224,7 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
         for (const p of live) p.rec.error = err;
       }
     }
-    // Giải phóng dữ liệu đoạn đã xử lý, rồi đếm và vẽ các ảnh đã xong
+    // Release the data of processed pieces, then count and draw the images that are done
     for (const p of batch) p.rec.tiles[p.i].blob = null;
     for (const p of batch) {
       p.rec.pending--;
@@ -1232,14 +1232,14 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
     }
   };
 
-  // Bước 1: cắt tất cả ảnh dài thành đoạn
+  // Step 1: cut all tall images into pieces
   for (const rec of recs) {
     try {
       const t = await cutToTiles(rec.img.blob, rec.img.mime);
       rec.W = t.W;
       rec.H = t.H;
       rec.tiles = t.tiles;
-      rec.whole = t.tiles.length === 1; // ảnh thường: không cắt
+      rec.whole = t.tiles.length === 1; // normal image: not cut
       rec.pending = rec.tiles.length;
     } catch (err) {
       rec.error = err;
@@ -1247,9 +1247,9 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
     }
   }
 
-  // Bước 2: xếp đoạn thành lô, không phân biệt ảnh thường hay ảnh dài. Lô tối đa TALL_BATCH_PIECES đoạn
-  // và BATCH_MAX_BYTES. Các đoạn của cùng một ảnh luôn nằm trong cùng một lô, trừ khi ảnh đó có nhiều
-  // đoạn hơn một lô thì phải chia.
+  // Step 2: pack pieces into batches, regardless of whether they come from normal or tall images. A batch holds at most TALL_BATCH_PIECES pieces
+  // and BATCH_MAX_BYTES. All pieces of the same image always stay in the same batch, unless that image has more pieces than one batch,
+  // in which case it must be split.
   const pieceBytes = (ps) => ps.reduce((sum, p) => sum + p.rec.tiles[p.i].blob.size, 0);
   const batches = [];
   let cur = [], curBytes = 0;
@@ -1271,25 +1271,25 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
   }
   closeCur();
 
-  // Bước 3: gửi PARALLEL_REQUESTS lô cùng lúc bằng Promise.all, xong nghỉ BATCH_PAUSE_MS rồi gửi nhóm kế
+  // Step 3: send PARALLEL_REQUESTS batches at once with Promise.all, then pause BATCH_PAUSE_MS before the next group
   for (let k = 0; k < batches.length; k += PARALLEL_REQUESTS) {
-    if (stopRequested()) break; // đã hủy hoặc máy chủ bận: không gửi thêm lô
+    if (stopRequested()) break; // stopped (cancelled or server busy): do not send more batches
     await Promise.all(batches.slice(k, k + PARALLEL_REQUESTS).map((b) => flush(b)));
     if (k + PARALLEL_REQUESTS < batches.length) await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
   }
 
-  for (const rec of recs) await finishRec(rec); // phòng trường hợp còn sót
+  for (const rec of recs) await finishRec(rec); // safety net for anything left over
   return recs.map((rec) => rec.result);
 }
 
-// Một ảnh (dùng cho chuột phải) -> items để phủ lên trang
+// One image (for right-click) -> items to overlay on the page
 async function geminiImageItems(blob, mime, apiKey, targetLang) {
   const [r] = await geminiTallBatch([{ blob, mime }], apiKey, targetLang);
   if (r.error) throw r.error;
   return { items: r.items, width: r.width, height: r.height };
 }
 
-// Ảnh chuột phải: Gemini trả về khung, đổi sang toạ độ pixel rồi lấy màu nền
+// Right-click image: Gemini returns boxes, convert them to pixel coordinates, then get the background color
 async function geminiImageBlocks(tabId, srcUrl, targetLang) {
   const key = await getGeminiKey();
   const blob = await loadImageBlob(tabId, srcUrl);
@@ -1300,38 +1300,38 @@ async function geminiImageBlocks(tabId, srcUrl, targetLang) {
   return geminiImageItems(blob, mime, key, targetLang);
 }
 
-// ---------- Dịch một ảnh (chuột phải) ----------
+// ---------- Translate one image (right-click) ----------
 async function runImageViewer(tabId, srcUrl, quiet = false) {
-  let ref = null; // mã lần trừ lượt, dùng để hoàn lượt khi dịch không thành
+  let ref = null; // transaction id for the quota deduction, used to refund quota if translation fails
   try {
     if (!srcUrl) throw new Error('Không lấy được đường dẫn ảnh.');
     const { targetLang } = await getSettings();
     if (!quiet) notify(tabId, { type: 'SHOW_LOADING' });
-    ref = await Account.charge(1); // phải đăng nhập, có key và đủ lượt thì mới dịch
+    ref = await Account.charge(1); // must be logged in, have a key and have enough quota before translating
 
     const { items, width, height } = await geminiImageBlocks(tabId, srcUrl, targetLang);
     if (!items.length) {
-      await markState(tabId, 'noText', srcUrl); // side panel: khoá ảnh không có chữ
+      await markState(tabId, 'noText', srcUrl); // side panel: lock an image that has no text
       throw new Error('Gemini không tìm thấy chữ trong ảnh.');
     }
 
     notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl, width, height, items });
-    await markDone(tabId, srcUrl); // side panel: hiện "✓ Đã dịch" và bỏ chọn ảnh này
+    await markDone(tabId, srcUrl); // side panel: show "✓ Translated" and deselect this image
     notify(tabId, { type: 'HIDE_PANEL' });
     return true;
   } catch (err) {
     console.error('[OCR]', srcUrl, err);
-    await Account.refund(ref, 1); // lỗi hoặc không có chữ: trả lại lượt
+    await Account.refund(ref, 1); // error or no text: refund the quota
     notify(tabId, { type: 'SHOW_ERROR', error: err.message });
     return false;
   }
 }
 
-// ---------- Dịch tất cả ảnh trên trang ----------
-// Hủy lượt dịch đang chạy theo tab. Ảnh chưa vẽ xong sẽ được hoàn lượt ở cuối translateAll.
-const cancelFlags = new Map(); // tabId -> true khi người dùng bấm hủy
+// ---------- Translate all images on the page ----------
+// Cancel the running translation for a tab. Unfinished images are refunded at the end of translateAll.
+const cancelFlags = new Map(); // tabId -> true when the user presses cancel
 let cancelCheck = () => false;
-// Dừng do 503/429: không gửi thêm request, không đánh dấu ảnh chưa dịch là ảnh không có chữ
+// Stopped by 503/429: do not send more requests, do not mark unfinished images as no-text
 let busyStopped = false;
 const stopRequested = () => busyStopped || cancelCheck();
 
@@ -1342,20 +1342,20 @@ async function translateAll(tabId, urls) {
     return;
   }
   const requestedCount = list.length;
-  let skippedCount = 0; // số ảnh bị bỏ vì không đủ lượt
-  // Trừ lượt theo số ảnh được chọn; ảnh không dịch được (lỗi, không có chữ) sẽ được hoàn lại ở cuối.
-  // Đặt trạng thái "đang chạy" trước để side panel luôn nhận được lúc kết thúc, kể cả khi trừ lượt thất bại.
+  let skippedCount = 0; // number of images skipped for lack of quota
+  // Deduct quota by the number of selected images; images not translated (error, no text) are refunded at the end.
+  // Set the "running" state first so the side panel always receives the end state, even if the quota deduction fails.
   await setJob(tabId, 'running');
-  // Server chỉ nhận tối đa 50 lượt trong một lần trừ, nên chia thành nhiều lần trừ
+  // The server accepts at most 50 quota units per deduction, so split into several deductions
   const CHARGE_MAX = 50;
-  let refs = []; // [{ ref, count }] các lần trừ đã thành công, để hoàn lại khi cần
+  let refs = []; // [{ ref, count }] successful deductions, to refund when needed
   const stats = { drawn: 0 };
   cancelFlags.delete(tabId);
   cancelCheck = () => cancelFlags.get(tabId) === true;
   try {
     try {
-      // Không đủ lượt cho cả lượt dịch: vẫn dịch số ảnh đầu danh sách (từ trên xuống) bằng đúng số lượt còn lại,
-      // xong thì báo hết lượt. Hết sạch lượt thì Account.require ném lỗi "hết lượt" như cũ.
+      // Not enough quota for the whole run: still translate the first images in the list (top to bottom) using the remaining quota,
+      // then report out of quota. When quota is fully used up, Account.require throws the "out of quota" error as before.
       const acc = await Account.require();
       const have = Math.floor(Number(acc.user.credits) || 0);
       if (have < list.length) {
@@ -1368,7 +1368,7 @@ async function translateAll(tabId, urls) {
         refs.push({ ref, count });
       }
     } catch (err) {
-      // Trừ thiếu (hết lượt, lỗi mạng...): hoàn những lần đã trừ rồi dừng
+      // Partial deduction failure (out of quota, network error...): refund the deductions already made, then stop
       for (const r of refs) await Account.refund(r.ref, r.count);
       refs = [];
       notify(tabId, { type: 'SHOW_ERROR', error: err.message });
@@ -1376,8 +1376,8 @@ async function translateAll(tabId, urls) {
     }
     await translateAllGemini(tabId, list, stats);
   } finally {
-    const wasCancelled = cancelCheck(); // đọc trước khi xoá cờ hủy bên dưới
-    // Hoàn lượt cho ảnh không dịch được, theo thứ tự các lần trừ
+    const wasCancelled = cancelCheck(); // read before the cancel flag below is cleared
+    // Refund quota for images not translated, in the order of the deductions
     let toRefund = list.length - stats.drawn;
     for (const r of refs) {
       const n = Math.min(r.count, toRefund);
@@ -1385,7 +1385,7 @@ async function translateAll(tabId, urls) {
       toRefund -= n;
     }
     cancelFlags.delete(tabId);
-    notify(tabId, { type: 'QUEUE_CLEAR' }); // hết lượt: các ảnh còn trong hàng chờ không còn bị khoá
+    notify(tabId, { type: 'QUEUE_CLEAR' }); // out of quota: images still in the queue are no longer locked
     if (skippedCount > 0 && !wasCancelled) {
       notify(tabId, {
         type: 'SHOW_ERROR',
@@ -1396,7 +1396,7 @@ async function translateAll(tabId, urls) {
   }
 }
 
-// Side panel nào đang mở ở cửa sổ nào (popup.js nối cổng 'sidepanel:<windowId>' khi mở)
+// Which window each open side panel is in (popup.js connects port 'sidepanel:<windowId>' when opened)
 const panelPorts = new Map(); // windowId -> Set<Port>
 chrome.runtime.onConnect.addListener((port) => {
   const m = /^sidepanel:(\d+)$/.exec(port.name || '');
@@ -1413,7 +1413,7 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-// Báo mọi tab trong cửa sổ để nút nổi giữ trạng thái "đang mở" khi side panel mở
+// Notify all tabs in the window so the floating button keeps its "open" state while the side panel is open
 function broadcastPanelState(winId, open) {
   chrome.tabs.query({ windowId: winId }).then((tabs) => {
     for (const t of tabs) chrome.tabs.sendMessage(t.id, { type: 'PANEL_STATE', open }).catch(() => {});
@@ -1422,7 +1422,7 @@ function broadcastPanelState(winId, open) {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_NOTEXT' && sender.tab) {
-    // Content script khi tải trang: trả về các ảnh không có chữ của tab đó
+    // Content script on page load: return the no-text images for that tab
     chrome.storage.session.get('noText').then(
       (store) => sendResponse({ urls: ((store.noText || {})[sender.tab.id]) || [] }),
       () => sendResponse({ urls: [] })
@@ -1430,7 +1430,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === 'TRANSLATE_ONE' && sender.tab) {
-    // Nút "Dịch ảnh" trên từng ảnh: dịch đúng ảnh đó, báo kết quả về để nút đổi trạng thái
+    // "Translate image" button on each image: translate only that image, and report the result back so the button updates
     runImageViewer(sender.tab.id, msg.srcUrl, true).then(
       (ok) => sendResponse({ ok }),
       () => sendResponse({ ok: false })
@@ -1443,8 +1443,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   if (msg.type === 'TOGGLE_SIDE_PANEL' && sender.tab) {
-    // Nút nổi bên phải trang: đang mở thì đóng, đang đóng thì mở (giống icon trên thanh công cụ).
-    // sidePanel.open phải gọi ngay (đồng bộ) trong handler để còn trong cử chỉ bấm của người dùng.
+    // Floating button on the right of the page: if open, close it; if closed, open it (same as the toolbar icon).
+    // sidePanel.open must be called right away (synchronously) in the handler so it still counts as the user's click gesture.
     const winId = sender.tab.windowId;
     const ports = panelPorts.get(winId);
     if (ports && ports.size) {
@@ -1459,7 +1459,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   if (msg.type === 'REBIND_URL' && sender.tab) {
-    // Trang đổi link ảnh đã dịch: đổi khoá URL ở trạng thái "Đã dịch" để side panel khớp ảnh mới
+    // Page changed the image link that was translated: update the URL key in the "translated" state so the side panel matches the new image
     renameDone(sender.tab.id, msg.oldUrl, msg.newUrl);
     return false;
   }
@@ -1481,7 +1481,7 @@ function notify(tabId, msg) {
 }
 
 
-// ---------- Trạng thái theo tab cho side panel: đã dịch, không có chữ, đang chạy ----------
+// ---------- Per-tab state for the side panel: translated, no text, running ----------
 async function markState(tabId, key, url) {
   try {
     const store = await chrome.storage.session.get(key);
@@ -1490,7 +1490,7 @@ async function markState(tabId, key, url) {
     set.add(url);
     map[tabId] = [...set];
     await chrome.storage.session.set({ [key]: map });
-    // Báo về trang để nút dịch trên ảnh đó được ẩn ngay
+    // Tell the page so the translate button on that image is hidden immediately
     if (key === 'noText') notify(tabId, { type: 'NOTEXT', srcUrl: url });
   } catch (err) {
     console.warn(`[${key}] không lưu được`, err.message);
@@ -1529,7 +1529,7 @@ async function clearTabState(tabId) {
   }
 }
 
-// Trang tải lại hoặc tab đóng thì xoá trạng thái của tab đó
+// Page reloaded or tab closed: delete that tab's state
 chrome.tabs.onUpdated.addListener(async (tabId, info) => {
   if (info.status === 'loading') await clearTabState(tabId);
 });
