@@ -137,7 +137,6 @@ const GEMINI_MODELS = [
   'gemini-3.5-flash-lite',
   'gemini-3-flash-preview',
   'gemini-3.6-flash',
-  'gemini-robotics-er-2-preview',
 ];
 const CYCLE_WAIT_MS = 10000;
 const MAX_CYCLES = 2;
