@@ -135,6 +135,9 @@ const GEMINI_MODELS = [
   'gemini-3.1-flash-lite',
   'gemini-flash-lite-latest',
   'gemini-3.5-flash-lite',
+  'gemini-3-flash-preview',
+  'gemini-3.6-flash',
+  'gemini-robotics-er-2-preview',
 ];
 const CYCLE_WAIT_MS = 10000;
 const MAX_CYCLES = 2;
@@ -609,7 +612,7 @@ const BATCH_MAX_IMAGES = 8; // lô nhỏ: model lite hay trả "no text" hàng l
 const PARALLEL_REQUESTS = 2; // số request chạy đồng thời (Promise.all)
 const BATCH_PAUSE_MS = 3000; // nghỉ sau mỗi nhóm request rồi mới gửi nhóm kế
 const BATCH_MAX_BYTES = 10 * 1024 * 1024;
-const EXTRA_ROUND = 4; // vòng cuối: chỉ chạy khi vòng 3 còn > 1 ảnh rỗng; chạy xong thì dừng
+const LAST_ROUND = 3; // vòng 1 cho tất cả ảnh, vòng 2 và 3 chỉ cho ảnh còn rỗng hoặc lỗi
 
 // Tải ảnh thành Blob. Ảnh blob: chỉ đọc được trong trang tạo ra nó,
 // nên nhờ content script đọc giúp rồi gửi về dưới dạng data URL.
@@ -711,7 +714,7 @@ Many consecutive images may contain no text at all (just artwork or empty space)
     geminiReport.set(img.srcUrl, blocks);
     const bitmap = await createImageBitmap(img.blob);
     try {
-      let items = itemsFromBlocks(blocks, bitmap, round === EXTRA_ROUND); // chỉ kiểm tra chặt ở vòng cuối
+      let items = itemsFromBlocks(blocks, bitmap, round === LAST_ROUND); // chỉ kiểm tra chặt ở vòng cuối
       console.log(`[OCR] vòng ${round}: ${blocks.length} khối -> vẽ ${items.length}`, img.srcUrl);
       if (items.length && !cancelCheck()) {
         notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl: img.srcUrl, width: bitmap.width, height: bitmap.height, items });
@@ -838,17 +841,11 @@ Many consecutive images may contain no text at all (just artwork or empty space)
   const onImageDone = (r) => (r.whole ? onWholeDone(r) : onTallDone(r));
   await geminiTallBatch(loaded.filter((x) => !x.blank), apiKey, targetLang, onImageDone);
 
-  // Hỏi lại ảnh thường bị nghi rỗng: vòng 2 và 3
-  for (let round = 2; round <= 3; round++) {
+  // Round 1 runs for all images above. Then recheck images still empty or failed: rounds 2 and 3 only
+  for (let round = 2; round <= LAST_ROUND; round++) {
     const work = [...emptyImgs, ...failedImgs];
     if (!work.length || stopRequested()) break;
     ({ empty: emptyImgs, failed: failedImgs } = await runRecheckRound(work, round));
-  }
-
-  // Vòng 4: chỉ khi sau vòng 3 còn hơn 1 ảnh rỗng. Chạy xong thì dừng.
-  if (emptyImgs.length > 1 && !stopRequested()) {
-    const work = [...emptyImgs, ...failedImgs];
-    ({ empty: emptyImgs, failed: failedImgs } = await runRecheckRound(work, EXTRA_ROUND));
   }
 
   // Tổng kết: mỗi ảnh nằm trong đúng một nhóm
