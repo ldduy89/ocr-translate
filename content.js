@@ -27,7 +27,7 @@
         break;
       }
       case 'SCROLL_TO_IMAGE': scrollToImage(msg.url); break;
-      case 'PANEL_STATE':     setDockOpen(msg.open); break;
+      case 'PANEL_STATE':     break; // the dock now reflects the in-page panel only
       case 'NOTEXT':          markNoText(msg.srcUrl); break;
       case 'MENU_TRANSLATE':  sendResponse({ handled: translateFromMenu(msg.srcUrl) }); break;
       case 'FETCH_BLOB':
@@ -37,7 +37,7 @@
   });
 
   // ---------- Watch for image changes on the page -> tell the side panel to refresh its list ----------
-  const OWN_SELECTOR = '#ocr-pill-host, #ocr-dock-host, .ocr-img-overlay, #ocr-panel, #ocr-toast';
+  const OWN_SELECTOR = '#ocr-pill-host, #ocr-dock-host, #ocr-page-panel-host, .ocr-img-overlay, #ocr-panel, #ocr-toast';
   function isOwnNode(n) {
     const el = n && n.nodeType === 1 ? n : (n && n.parentElement);
     return !!(el && el.closest && el.closest(OWN_SELECTOR));
@@ -278,36 +278,6 @@
     releaseHost(entry.host);
   }
 
-  function aspectOf(im) {
-    if (im.naturalWidth > 0) return im.naturalWidth / im.naturalHeight;
-    const r = im.getBoundingClientRect();
-    return r.width / Math.max(1, r.height);
-  }
-
-  // List of <img> in DOM order inside the scroll container (or the whole page if the image is not inside a scroll div)
-  function imagesIn(container) {
-    return container === document ? [...document.images] : [...container.querySelectorAll('img')];
-  }
-
-  // Record which index the translated image has within its scroll container
-  function snapshotEntry(entry) {
-    const im = entry.img;
-    entry.cont = findScrollHost(im) || document;
-    entry.ord = imagesIn(entry.cont).indexOf(im);
-  }
-
-  // Find a replacement image: take the image with the same index in the scroll container (e.g. if image 5 was translated, take image 5).
-  // If that image has no translation yet or has a different aspect ratio (off by more than 5%), return null: hide temporarily and retry, do not guess another image.
-  function findByPosition(entry) {
-    if (!(entry.ord >= 0)) return null;
-    const cont = entry.cont && (entry.cont === document || entry.cont.isConnected) ? entry.cont : document;
-    const cand = imagesIn(cont)[entry.ord];
-    if (!cand || !cand.isConnected) return null;
-    for (const e of overlayEntries.values()) if (e !== entry && e.img === cand) return null; // already has another translation attached
-    const aspectOld = entry.width / entry.height;
-    return Math.abs(aspectOf(cand) / aspectOld - 1) <= 0.05 ? cand : null;
-  }
-
   // Attach the translation to the new <img> / new link and update the URL key (including the "Translated" state in the side panel).
   // A different aspect ratio means a different image: remove the translation so it does not sit in the wrong place.
   function rebindEntry(entry, newImg) {
@@ -346,8 +316,8 @@
     if (!img.isConnected) {
       // The page rebuilt the <img> (common when the window is resized, e.g. the side panel opens): find the image again by its URL
       // and attach the translation to it instead of deleting it. If it is not found, hide temporarily and retry at the next check.
-      // (if the old URL is gone, find the image by position and size, then store the new URL in the translation)
-      const again = findImage(entry.srcUrl) || findByPosition(entry);
+      // Matching is by image link only (never by the image's index/position in the page)
+      const again = findImage(entry.srcUrl);
       if (again && again.isConnected && rebindEntry(entry, again)) {
         img = entry.img;
       } else {
@@ -401,7 +371,6 @@
     const sizeKey = rect.width.toFixed(1) + 'x' + rect.height.toFixed(1);
     if (entry.sizeKey === sizeKey) return;
     entry.sizeKey = sizeKey;
-    snapshotEntry(entry);
 
     layer.textContent = '';
     const pad = 2;
@@ -1073,10 +1042,74 @@
   let dockEnabled = true;
   let panelOpen = false; // side panel is open: the button keeps its position as when hovered
 
+  const PAGE_PANEL_W = 380; // width (px) of the in-page panel
   function setDockOpen(on) {
     panelOpen = !!on;
-    if (dockBtn) dockBtn.classList.toggle('open', panelOpen);
+    if (dockBtn) {
+      dockBtn.classList.toggle('open', panelOpen);
+      dockBtn.style.right = panelOpen ? PAGE_PANEL_W + 'px' : '0';
+    }
   }
+
+  // ================= In-page panel (a div on the right of the page, same content as the side panel / popup.html) =================
+  // popup.html is loaded in an iframe inside the div, so its CSS and JS stay isolated from the page and keep working unchanged.
+  let pagePanelHost = null;
+  let pagePanelBox = null;
+
+  function ensurePagePanel() {
+    if (pagePanelHost && pagePanelHost.isConnected) return;
+    pagePanelHost = document.createElement('div');
+    pagePanelHost.id = 'ocr-page-panel-host';
+    pagePanelHost.style.cssText = 'all:initial;position:fixed;top:0;right:0;width:0;height:0;z-index:2147483645;';
+    const root = pagePanelHost.attachShadow({ mode: 'closed' });
+    const st = document.createElement('style');
+    st.textContent = `
+      .box{position:fixed;top:0;right:0;width:${PAGE_PANEL_W}px;max-width:100vw;height:100vh;background:#282c34;
+        box-shadow:-4px 0 18px rgba(0,0,0,.35);transform:translateX(100%);visibility:hidden;
+        transition:transform .22s ease,visibility 0s linear .22s}
+      .box.show{transform:none;visibility:visible;transition:transform .22s ease,visibility 0s}
+      iframe{display:block;width:100%;height:100%;border:0;background:#282c34}
+      @media (prefers-reduced-motion:reduce){.box,.box.show{transition:none}}`;
+    root.appendChild(st);
+    const box = document.createElement('div');
+    box.className = 'box';
+    const frame = document.createElement('iframe');
+    frame.title = 'AI Image Translate';
+    // Load lazily the first time the panel is opened
+    frame.dataset.src = chrome.runtime.getURL('popup.html');
+    box.appendChild(frame);
+    // Do not let events reach the page
+    for (const t of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'click', 'dblclick', 'contextmenu', 'wheel']) {
+      box.addEventListener(t, (e) => e.stopPropagation());
+    }
+    root.appendChild(box);
+    pagePanelBox = box;
+    (document.body || document.documentElement).appendChild(pagePanelHost);
+  }
+
+  function togglePagePanel(force) {
+    ensurePagePanel();
+    const show = typeof force === 'boolean' ? force : !pagePanelBox.classList.contains('show');
+    const frame = pagePanelBox.querySelector('iframe');
+    if (show && !frame.src) frame.src = frame.dataset.src;
+    // Next frame, so the slide-in transition also runs the first time
+    requestAnimationFrame(() => pagePanelBox.classList.toggle('show', show));
+    setDockOpen(show);
+  }
+
+  // Esc closes the panel
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && panelOpen) togglePagePanel(false);
+  }, true);
+
+  // Click outside the panel (on the page) closes it. Clicks inside the panel (its iframe) never reach this document,
+  // and the dock button toggles by itself, so both are ignored here.
+  document.addEventListener('pointerdown', (e) => {
+    if (!panelOpen) return;
+    const path = e.composedPath ? e.composedPath() : [];
+    if (path.includes(pagePanelHost) || path.includes(dockHost)) return;
+    togglePagePanel(false);
+  }, true);
 
   function ensureDock() {
     if (dockHost && dockHost.isConnected) return;
@@ -1103,15 +1136,12 @@
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
-      try { chrome.runtime.sendMessage({ type: 'TOGGLE_SIDE_PANEL' }).catch(() => {}); } catch (_) {}
+      togglePagePanel();
     });
     root.appendChild(btn);
     dockBtn = btn;
     btn.classList.toggle('open', panelOpen);
     (document.body || document.documentElement).appendChild(dockHost);
-    try {
-      chrome.runtime.sendMessage({ type: 'GET_PANEL_STATE' }).then((r) => setDockOpen(r && r.open)).catch(() => {});
-    } catch (_) {}
   }
 
   function updateDock() {

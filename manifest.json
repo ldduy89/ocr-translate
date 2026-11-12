@@ -55,7 +55,8 @@
     {
       "resources": [
         "icons/icon32.png",
-        "icons/icon48.png"
+        "icons/icon48.png",
+        "popup.html"
       ],
       "matches": [
         "<all_urls>"

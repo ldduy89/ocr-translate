@@ -1,6 +1,7 @@
 // Tell the background that the side panel is open (per window) so the floating button on the page can toggle.
 // Closing the panel disconnects the port automatically. If the service worker sleeps and drops the port, reconnect.
 (async () => {
+  if (window.top !== window) return; // inside the in-page panel (iframe): no side-panel port
   let winId;
   try { winId = (await chrome.windows.getCurrent()).id; } catch (_) { return; }
   const connect = () => {
