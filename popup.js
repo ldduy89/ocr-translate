@@ -282,8 +282,8 @@ function renderQr() {
     return;
   }
   $('qrImg').style.display = '';
-  // $('qrImg').src = `https://img.vietqr.io/image/MB-0981902981-qr_only.svg?&addInfo=ho%20tro%20${u.id}`;
-  $('qrImg').src = `https://img.vietqr.io/image/BIDV-8900838985-qr_only.svg?&addInfo=ho%20tro%20${u.id}`;
+  $('qrImg').src = `https://img.vietqr.io/image/MB-0981902981-qr_only.svg?&addInfo=ho%20tro%20${u.id}`;
+  // $('qrImg').src = `https://img.vietqr.io/image/BIDV-8900838985-qr_only.svg?&addInfo=ho%20tro%20${u.id}`;
  
   const note = $('qrNote');
   note.textContent = '';
