@@ -228,7 +228,7 @@
 
   // Font size of the translation relative to the original line spacing (adjust if the translated text looks bigger or smaller than the original)
   const FONT_CAP = 0.8;
-  const LINE_H = 1.0; // line spacing; leaves room for Vietnamese diacritics so they are not clipped
+  const LINE_H = 1.05; // line spacing; leaves room for Vietnamese diacritics so they are not clipped
   const MIN_FONT = 9; // hard floor: below this size the text is unreadable
 
   // maxSize: maximum font size based on the original text in the image (may be absent)
@@ -310,6 +310,9 @@
   }
 
   function deselectBox() {
+    if (selected) {
+      for (const b of selected.entry.layer.querySelectorAll('[data-idx]')) b.style.cursor = 'pointer';
+    }
     if (selected && selected.entry.selEl) selected.entry.selEl.remove();
     if (selected) selected.entry.selEl = null;
     selected = null;
@@ -364,6 +367,7 @@
       entry.layer.appendChild(entry.selEl);
     }
     const w = parseFloat(box.style.width), h = parseFloat(box.style.height);
+    box.style.cursor = 'move';
     Object.assign(entry.selEl.style, {
       left: box.style.left, top: box.style.top, width: box.style.width, height: box.style.height,
     });
@@ -388,8 +392,10 @@
     };
     const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
     let cur = { x: start.x, y: start.y, w: start.w, h: start.h };
+    let moved = false;
     const onMove = (ev) => {
       const dx = ev.clientX - start.cx, dy = ev.clientY - start.cy;
+      if (Math.abs(dx) + Math.abs(dy) > 3) moved = true; // ignore tiny jitter from a click
       if (dir === 'move') {
         // Keep the size, stay inside the image
         cur = {
@@ -412,6 +418,7 @@
       hd.removeEventListener('pointermove', onMove);
       hd.removeEventListener('pointerup', onUp);
       hd.removeEventListener('pointercancel', onUp);
+      if (!moved) { refreshSelection(); return; }
       // Save the new geometry as fractions of the image, then rebuild the text so it fits the new size
       entry.boxOverrides = entry.boxOverrides || {};
       entry.boxOverrides[idx] = { x: cur.x / LW, y: cur.y / LH, w: cur.w / LW, h: cur.h / LH };
@@ -424,10 +431,58 @@
     hd.addEventListener('pointercancel', onUp);
   }
 
+  // Double-click a translated box: edit its text in place. Enter (or click outside) saves, Shift+Enter adds a line, Esc cancels.
+  function startTextEdit(e, entry, idx) {
+    e.preventDefault();
+    e.stopPropagation();
+    const box = entry.layer.querySelector(`[data-idx="${idx}"]`);
+    if (!box || box.isContentEditable) return;
+    const original = box.textContent;
+    box.contentEditable = 'true';
+    box.style.cursor = 'text';
+    box.style.outline = '2px solid #4da3ff';
+    box.style.userSelect = 'text';
+    box.focus();
+    const range = document.createRange();
+    range.selectNodeContents(box);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+
+    const finish = (save) => {
+      box.removeEventListener('blur', onBlur);
+      box.removeEventListener('keydown', onKey);
+      if (save) {
+        const text = box.innerText.replace(/\n$/, '');
+        entry.textOverrides = entry.textOverrides || {};
+        entry.textOverrides[idx] = text;
+        entry.sizeKey = ''; // rebuild the box so the text is fitted again
+        layoutOverlay(entry);
+        refreshSelection();
+      } else {
+        box.contentEditable = 'false';
+        box.textContent = original;
+        box.style.outline = '';
+      }
+    };
+    const onBlur = () => finish(true);
+    const onKey = (ev) => {
+      ev.stopPropagation(); // keys typed in the box must not trigger page shortcuts
+      if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+      else if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); finish(true); }
+    };
+    box.addEventListener('blur', onBlur);
+    box.addEventListener('keydown', onKey);
+  }
+
+  // Press anywhere on the box (including over the text) and drag to move it. Selects the box if it is not selected yet.
   function onBoxPointerDown(e, entry, idx) {
     e.stopPropagation();
-    if (selected && selected.entry === entry && selected.idx === idx) return;
-    selectBox(entry, idx);
+    const box = entry.layer.querySelector(`[data-idx="${idx}"]`);
+    if (box && box.isContentEditable) return; // editing text: let the caret move normally
+    if (!(selected && selected.entry === entry && selected.idx === idx)) selectBox(entry, idx);
+    if (box) box.style.cursor = 'move';
+    startResize(e, entry, idx, 'move');
   }
 
   // Click anywhere outside the translated boxes (and their handles): deselect
@@ -595,9 +650,11 @@
       div.style.pointerEvents = 'auto';
       div.style.cursor = 'pointer';
       div.addEventListener('pointerdown', (e) => onBoxPointerDown(e, entry, idx));
+      div.addEventListener('dblclick', (e) => startTextEdit(e, entry, idx));
       // Original font size from Gemini as a cap (never larger than the original text); if absent, use the measured line spacing
       const cap = it.fontPx ? it.fontPx * sy : it.linePx ? it.linePx * sy * FONT_CAP : 0;
-      fitText(div, it.translated, tw, th, cap);
+      const text = entry.textOverrides && entry.textOverrides[idx] != null ? entry.textOverrides[idx] : it.translated;
+      fitText(div, text, tw, th, cap);
     }
   }
 
