@@ -1,5 +1,5 @@
 --- orig_src/content.js	2026-11-16 04:13:22.806945572 +0000
-+++ src/content.js	2026-11-16 06:08:42.037684325 +0000
++++ src/content.js	2026-11-16 06:28:12.355307310 +0000
 @@ -1,5 +1,14 @@
  (() => {
 -  if (window.__ocrTranslateInjected) return;
@@ -99,7 +99,7 @@
    // Font size of the translation relative to the original line spacing (adjust if the translated text looks bigger or smaller than the original)
    const FONT_CAP = 0.8;
 -  const LINE_H = 1.0; // line spacing; leaves room for Vietnamese diacritics so they are not clipped
-+  const LINE_H = 1.05; // line spacing; leaves room for Vietnamese diacritics so they are not clipped
++  const LINE_H = 1.1; // line spacing; leaves room for Vietnamese diacritics so they are not clipped
    const MIN_FONT = 9; // hard floor: below this size the text is unreadable
  
    // maxSize: maximum font size based on the original text in the image (may be absent)
@@ -120,7 +120,7 @@
      lines = wrapWords(text, w);
      div.style.fontSize = size + 'px';
      div.style.lineHeight = String(LINE_H);
-@@ -270,10 +332,474 @@
+@@ -270,10 +332,490 @@
      hostPosition.delete(host);
    }
  
@@ -261,6 +261,13 @@
 +    hd.addEventListener('pointercancel', onUp);
 +  }
 +
++  // Shapes offered in the edit toolbar
++  const SHAPE_ICON = (inner) => `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${inner}</svg>`;
++  const SHAPE_OPTIONS = [
++    ['rect', SHAPE_ICON('<rect x="2" y="4" width="12" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/>')],
++    ['ellipse', SHAPE_ICON('<ellipse cx="8" cy="8" rx="6" ry="4" fill="none" stroke="currentColor" stroke-width="1.6"/>')],
++  ];
++
 +  // Apply a box's style (font, colour, weight, italic) to its element. With no saved style, the global font and default colour are used.
 +  function styleBox(box, st) {
 +    const font = st && st.font && FONT_OPTIONS[st.font] ? st.font : subFontId;
@@ -306,7 +313,12 @@
 +
 +    // Dropdown styled like the language picker: a closed trigger and a dark list (no search box)
 +    let openList = null; // only one list is open at a time
-+    const mkDropdown = (opts, value, onChange) => {
++    // A label that starts with "<" is icon markup (SVG); anything else is plain text
++    const setLabel = (el, text) => {
++      if (text.startsWith('<')) el.innerHTML = text;
++      else el.textContent = text;
++    };
++    const mkDropdown = (opts, value, onChange, compact = false) => {
 +      const FONT = '12px system-ui,"Segoe UI",sans-serif';
 +      const wrap = document.createElement('div');
 +      Object.assign(wrap.style, { all: 'initial', position: 'relative', display: 'inline-block' });
@@ -315,10 +327,11 @@
 +      const lbl = document.createElement('span');
 +      const arrow = document.createElement('span');
 +      arrow.innerHTML = '<svg width="8" height="5" viewBox="0 0 8 5" aria-hidden="true"><path d="M0 0h8L4 5z" fill="#aab1bf"/></svg>';
-+      Object.assign(arrow.style, { all: 'initial', display: 'inline-flex', alignItems: 'center' });
++      Object.assign(arrow.style, { all: 'initial', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' });
++      Object.assign(lbl.style, { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', lineHeight: '1', color: '#dcdfe4', font: FONT });
 +      Object.assign(trigger.style, {
-+        all: 'initial', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px',
-+        boxSizing: 'border-box', height: '26px', minWidth: '84px', padding: '0 8px', borderRadius: '6px',
++        all: 'initial', display: 'flex', alignItems: 'center', justifyContent: compact ? 'center' : 'space-between', gap: compact ? '6px' : '8px',
++        boxSizing: 'border-box', height: '26px', minWidth: compact ? '56px' : '84px', padding: '0 8px', borderRadius: '6px',
 +        background: '#1e2228', border: '1px solid #3a3f4b', color: '#dcdfe4', font: FONT,
 +        cursor: 'pointer', whiteSpace: 'nowrap', userSelect: 'none',
 +      });
@@ -335,7 +348,7 @@
 +      const rows = [];
 +      const paint = () => {
 +        const hit = opts.find(([v]) => v === value) || opts[0];
-+        lbl.textContent = hit[1];
++        setLabel(lbl, hit[1]);
 +        for (const [row, v] of rows) {
 +          row.style.color = v === value ? '#61afef' : '#dcdfe4';
 +          row.style.fontWeight = v === value ? '600' : '400';
@@ -343,7 +356,7 @@
 +      };
 +      for (const [v, label] of opts) {
 +        const row = document.createElement('div');
-+        row.textContent = label;
++        setLabel(row, label);
 +        Object.assign(row.style, {
 +          all: 'initial', display: 'block', padding: '6px 10px', whiteSpace: 'nowrap',
 +          cursor: 'pointer', font: FONT,
@@ -384,6 +397,11 @@
 +      ensureFont(v).then(() => styleBox(box, st)); // the file may still be loading
 +      box.focus();
 +    });
++    const shapeSel = mkDropdown(SHAPE_OPTIONS, st.shape || box.dataset.defShape || 'rect', (v) => {
++      setStyle({ shape: v });
++      box.style.borderRadius = v === 'ellipse' ? '50%' : '8px'; // live preview; the box is laid out again when editing ends
++      box.focus();
++    }, true);
 +    const boldBtn = document.createElement('button');
 +    boldBtn.type = 'button';
 +    boldBtn.textContent = 'B';
@@ -455,9 +473,7 @@
 +      paintItalic();
 +    });
 +
-+    const sep = document.createElement('div');
-+    Object.assign(sep.style, { all: 'initial', display: 'inline-block', width: '1px', height: '18px', background: '#3a3f4b', margin: '0 2px' });
-+    tb.append(fontSel, boldBtn, italicBtn, sep, color);
++    tb.append(fontSel, shapeSel, boldBtn, italicBtn, color);
 +    entry.layer.appendChild(tb);
 +    // Above the box, or below it when there is no room above
 +    const bx = parseFloat(box.style.left), by = parseFloat(box.style.top), bh = parseFloat(box.style.height);
@@ -595,7 +611,7 @@
      overlayEntries.delete(entry.srcUrl);
      releaseHost(entry.host);
    }
-@@ -323,7 +849,7 @@
+@@ -323,7 +865,7 @@
        } else {
          if (overlayEntries.get(entry.srcUrl) === entry) { // not removed for aspect-ratio reasons: hide temporarily and retry later
            layer.style.display = 'none';
@@ -604,7 +620,7 @@
          }
          return;
        }
-@@ -374,17 +900,22 @@
+@@ -374,17 +916,23 @@
  
      layer.textContent = '';
      const pad = 2;
@@ -612,8 +628,10 @@
 +    for (let idx = 0; idx < items.length; idx++) {
 +      const it = items[idx];
        if (!it.translated) continue;
+-      const ellipse = it.shape === 'ellipse';
 +      if (entry.deletedBoxes && entry.deletedBoxes[idx]) continue; // removed by the user
-       const ellipse = it.shape === 'ellipse';
++      const stored = entry.boxStyles && entry.boxStyles[idx];
++      const ellipse = stored && stored.shape ? stored.shape === 'ellipse' : it.shape === 'ellipse';
        // Round bubble/oval: shrink by 1% so the original outline is still visible; the text box is taken from inside the ellipse
        const inset = ellipse ? 0.01 : 0;
        const bw = (it.box.x1 - it.box.x0) * sx;
@@ -632,7 +650,7 @@
        if (w < 6 || h < 6) continue;
        // Text area: for an ellipse, use only the rectangle that fits inside it (~73%); for a rectangle, keep an even 7% margin
        // (minimum 6px) so the text does not touch or get clipped at the edges
-@@ -418,15 +949,24 @@
+@@ -418,15 +966,25 @@
          padding: `${my}px ${mx}px`,
        });
        layer.appendChild(div);
@@ -645,6 +663,7 @@
        const cap = it.fontPx ? it.fontPx * sy : it.linePx ? it.linePx * sy * FONT_CAP : 0;
 -      fitText(div, it.translated, tw, th, cap);
 +      div.dataset.defColor = it.bg.dark ? '#ffffff' : '#000000';
++      div.dataset.defShape = it.shape === 'ellipse' ? 'ellipse' : 'rect';
 +      styleBox(div, entry.boxStyles && entry.boxStyles[idx]);
 +      const text = entry.textOverrides && entry.textOverrides[idx] != null ? entry.textOverrides[idx] : it.translated;
 +      fitText(div, text, tw, th, cap);
@@ -658,7 +677,7 @@
    }
  
    function scheduleLayout() {
-@@ -636,9 +1176,10 @@
+@@ -636,9 +1194,10 @@
      .pill{position:fixed;display:none;align-items:center;gap:8px;height:34px;padding:0 14px 0 5px;border:0;
        border-radius:999px;background:#fff;color:#2a3347;font:600 14px/1 system-ui,"Segoe UI",Roboto,sans-serif;
        box-shadow:0 2px 10px rgba(0,0,0,.3);cursor:pointer;pointer-events:auto;white-space:nowrap;
@@ -670,7 +689,7 @@
      .pill:hover{box-shadow:0 3px 14px rgba(0,0,0,.4)}
      .pill[data-state=loading]{cursor:progress}
      .ico{display:flex;width:24px;height:24px}
-@@ -734,11 +1275,11 @@
+@@ -734,11 +1293,11 @@
    function updatePin(entry) {
      const v = visibleRect(entry.img);
      if (pendingUrls.has(entry.srcUrl)) { // translating again: the spinning icon replaces this button
@@ -684,7 +703,7 @@
        return;
      }
      const pin = ensurePin(entry);
-@@ -747,8 +1288,9 @@
+@@ -747,8 +1306,9 @@
      pin.label.textContent = BTN_TEXT[state];
      pin.el.title = state === 'shown' ? 'Bấm để xem ảnh gốc' : 'Bấm để xem bản dịch';
      setBtnShown(pin.el, true);
@@ -695,7 +714,7 @@
      // Just translated and the button is visible: flash exactly once. When overlayImage runs the button is still hidden
      // (pendingUrls not yet cleared), so the flash is deferred until the first updatePin where the button is actually shown.
      if (entry.flashUntil && !entry.flashed) {
-@@ -757,6 +1299,123 @@
+@@ -757,6 +1317,123 @@
      }
    }
  
@@ -819,7 +838,7 @@
    // Just translated: the button flashes and bounces a few times to get attention, then stays still
    function flashPin(entry) {
      const el = entry.pin && entry.pin.el;
-@@ -803,7 +1462,7 @@
+@@ -803,7 +1480,7 @@
        return;
      }
      setBtnShown(p.btn.el, true);
@@ -828,7 +847,7 @@
      p.btn.el.style.top = v.t + 10 + 'px';
    }
  
-@@ -932,7 +1591,7 @@
+@@ -932,7 +1609,7 @@
      const place = () => {
        const v = visibleRect(img);
        if (v.r - v.l < BTN_MIN || v.b - v.t < 40) return false;

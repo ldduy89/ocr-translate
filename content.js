@@ -1,5 +1,14 @@
 (() => {
-  if (window.__ocrTranslateInjected) return;
+  // The script is injected once per page. After the extension is reloaded, the old copy is still in the page but its
+  // chrome API is gone (chrome.runtime.id is undefined): remove its UI and start again, so the new version shows its buttons.
+  if (window.__ocrTranslateInjected) {
+    if (chrome.runtime && chrome.runtime.id) return; // the current copy is already running
+    for (const id of ['ocr-dock-host', 'ocr-pill-host', 'ocr-page-panel-host', 'ocr-toast', 'ocr-panel', 'ocr-confirm-host']) {
+      const el = document.getElementById(id);
+      if (el) el.remove();
+    }
+    document.querySelectorAll('.ocr-img-overlay').forEach((n) => n.remove());
+  }
   window.__ocrTranslateInjected = true;
 
   let panel = null;
@@ -256,7 +265,7 @@
 
   // Font size of the translation relative to the original line spacing (adjust if the translated text looks bigger or smaller than the original)
   const FONT_CAP = 0.8;
-  const LINE_H = 1.05; // line spacing; leaves room for Vietnamese diacritics so they are not clipped
+  const LINE_H = 1.1; // line spacing; leaves room for Vietnamese diacritics so they are not clipped
   const MIN_FONT = 9; // hard floor: below this size the text is unreadable
 
   // maxSize: maximum font size based on the original text in the image (may be absent)
@@ -460,6 +469,13 @@
     hd.addEventListener('pointercancel', onUp);
   }
 
+  // Shapes offered in the edit toolbar
+  const SHAPE_ICON = (inner) => `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${inner}</svg>`;
+  const SHAPE_OPTIONS = [
+    ['rect', SHAPE_ICON('<rect x="2" y="4" width="12" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/>')],
+    ['ellipse', SHAPE_ICON('<ellipse cx="8" cy="8" rx="6" ry="4" fill="none" stroke="currentColor" stroke-width="1.6"/>')],
+  ];
+
   // Apply a box's style (font, colour, weight, italic) to its element. With no saved style, the global font and default colour are used.
   function styleBox(box, st) {
     const font = st && st.font && FONT_OPTIONS[st.font] ? st.font : subFontId;
@@ -505,7 +521,12 @@
 
     // Dropdown styled like the language picker: a closed trigger and a dark list (no search box)
     let openList = null; // only one list is open at a time
-    const mkDropdown = (opts, value, onChange) => {
+    // A label that starts with "<" is icon markup (SVG); anything else is plain text
+    const setLabel = (el, text) => {
+      if (text.startsWith('<')) el.innerHTML = text;
+      else el.textContent = text;
+    };
+    const mkDropdown = (opts, value, onChange, compact = false) => {
       const FONT = '12px system-ui,"Segoe UI",sans-serif';
       const wrap = document.createElement('div');
       Object.assign(wrap.style, { all: 'initial', position: 'relative', display: 'inline-block' });
@@ -514,10 +535,11 @@
       const lbl = document.createElement('span');
       const arrow = document.createElement('span');
       arrow.innerHTML = '<svg width="8" height="5" viewBox="0 0 8 5" aria-hidden="true"><path d="M0 0h8L4 5z" fill="#aab1bf"/></svg>';
-      Object.assign(arrow.style, { all: 'initial', display: 'inline-flex', alignItems: 'center' });
+      Object.assign(arrow.style, { all: 'initial', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' });
+      Object.assign(lbl.style, { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', lineHeight: '1', color: '#dcdfe4', font: FONT });
       Object.assign(trigger.style, {
-        all: 'initial', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px',
-        boxSizing: 'border-box', height: '26px', minWidth: '84px', padding: '0 8px', borderRadius: '6px',
+        all: 'initial', display: 'flex', alignItems: 'center', justifyContent: compact ? 'center' : 'space-between', gap: compact ? '6px' : '8px',
+        boxSizing: 'border-box', height: '26px', minWidth: compact ? '56px' : '84px', padding: '0 8px', borderRadius: '6px',
         background: '#1e2228', border: '1px solid #3a3f4b', color: '#dcdfe4', font: FONT,
         cursor: 'pointer', whiteSpace: 'nowrap', userSelect: 'none',
       });
@@ -534,7 +556,7 @@
       const rows = [];
       const paint = () => {
         const hit = opts.find(([v]) => v === value) || opts[0];
-        lbl.textContent = hit[1];
+        setLabel(lbl, hit[1]);
         for (const [row, v] of rows) {
           row.style.color = v === value ? '#61afef' : '#dcdfe4';
           row.style.fontWeight = v === value ? '600' : '400';
@@ -542,7 +564,7 @@
       };
       for (const [v, label] of opts) {
         const row = document.createElement('div');
-        row.textContent = label;
+        setLabel(row, label);
         Object.assign(row.style, {
           all: 'initial', display: 'block', padding: '6px 10px', whiteSpace: 'nowrap',
           cursor: 'pointer', font: FONT,
@@ -583,6 +605,11 @@
       ensureFont(v).then(() => styleBox(box, st)); // the file may still be loading
       box.focus();
     });
+    const shapeSel = mkDropdown(SHAPE_OPTIONS, st.shape || box.dataset.defShape || 'rect', (v) => {
+      setStyle({ shape: v });
+      box.style.borderRadius = v === 'ellipse' ? '50%' : '8px'; // live preview; the box is laid out again when editing ends
+      box.focus();
+    }, true);
     const boldBtn = document.createElement('button');
     boldBtn.type = 'button';
     boldBtn.textContent = 'B';
@@ -654,9 +681,7 @@
       paintItalic();
     });
 
-    const sep = document.createElement('div');
-    Object.assign(sep.style, { all: 'initial', display: 'inline-block', width: '1px', height: '18px', background: '#3a3f4b', margin: '0 2px' });
-    tb.append(fontSel, boldBtn, italicBtn, sep, color);
+    tb.append(fontSel, shapeSel, boldBtn, italicBtn, color);
     entry.layer.appendChild(tb);
     // Above the box, or below it when there is no room above
     const bx = parseFloat(box.style.left), by = parseFloat(box.style.top), bh = parseFloat(box.style.height);
@@ -895,7 +920,8 @@
       const it = items[idx];
       if (!it.translated) continue;
       if (entry.deletedBoxes && entry.deletedBoxes[idx]) continue; // removed by the user
-      const ellipse = it.shape === 'ellipse';
+      const stored = entry.boxStyles && entry.boxStyles[idx];
+      const ellipse = stored && stored.shape ? stored.shape === 'ellipse' : it.shape === 'ellipse';
       // Round bubble/oval: shrink by 1% so the original outline is still visible; the text box is taken from inside the ellipse
       const inset = ellipse ? 0.01 : 0;
       const bw = (it.box.x1 - it.box.x0) * sx;
@@ -948,6 +974,7 @@
       // Original font size from Gemini as a cap (never larger than the original text); if absent, use the measured line spacing
       const cap = it.fontPx ? it.fontPx * sy : it.linePx ? it.linePx * sy * FONT_CAP : 0;
       div.dataset.defColor = it.bg.dark ? '#ffffff' : '#000000';
+      div.dataset.defShape = it.shape === 'ellipse' ? 'ellipse' : 'rect';
       styleBox(div, entry.boxStyles && entry.boxStyles[idx]);
       const text = entry.textOverrides && entry.textOverrides[idx] != null ? entry.textOverrides[idx] : it.translated;
       fitText(div, text, tw, th, cap);
