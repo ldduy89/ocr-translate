@@ -186,7 +186,27 @@
   }
 
   // Measure with canvas: wrap lines to the box width, then pick the largest font size that fits
-  const FONT_FAMILY = 'system-ui, "Segoe UI", Roboto, sans-serif';
+  // Manga lettering font (Anime Ace 3 BB Italic, bundled in fonts/). Loaded from the extension's bytes, so the page's CSP does not block it.
+  // Until it loads (or if it fails), the system font is used.
+  const FONT_FAMILY = 'MangaSubFont, system-ui, "Segoe UI", Roboto, sans-serif';
+  const mangaFontReady = (async () => {
+    try {
+      const buf = await (await fetch(chrome.runtime.getURL('fonts/AnimeAce3BB-Italic.ttf'))).arrayBuffer();
+      const ff = new FontFace('MangaSubFont', buf);
+      await ff.load();
+      document.fonts.add(ff);
+      return true;
+    } catch (err) {
+      console.warn('[OCR] không nạp được font manga, dùng font hệ thống', err);
+      return false;
+    }
+  })();
+  // Text was measured with the fallback font: lay out every translation again once the manga font is ready
+  mangaFontReady.then((ok) => {
+    if (!ok) return;
+    for (const e of overlayEntries.values()) { e.sizeKey = ''; layoutOverlay(e); }
+    refreshSelection();
+  });
   let measureCtx = null;
 
   function wrapWords(text, maxW) {
@@ -275,8 +295,151 @@
     hostPosition.delete(host);
   }
 
+  // ---- Select a subtitle box and resize it by dragging its handles ----
+  // Position and size are saved as fractions of the image size, so the edit still fits when the image is resized or scrolled
+  let selected = null; // { entry, idx } of the box that is selected
+  const MIN_BOX = 16;  // smallest box size in px
+  const HANDLE_DIRS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+  const HANDLE_FX = { nw: 0, n: 0.5, ne: 1, e: 1, se: 1, s: 0.5, sw: 0, w: 0 };
+  const HANDLE_FY = { nw: 0, n: 0, ne: 0, e: 0.5, se: 1, s: 1, sw: 1, w: 0.5 };
+  const HANDLE_CURSOR = { nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize', n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize' };
+
+  function selectBox(entry, idx) {
+    selected = { entry, idx };
+    refreshSelection();
+  }
+
+  function deselectBox() {
+    if (selected && selected.entry.selEl) selected.entry.selEl.remove();
+    if (selected) selected.entry.selEl = null;
+    selected = null;
+  }
+
+  function buildSelection(entry, idx) {
+    const frame = document.createElement('div');
+    frame.className = 'ocr-sel';
+    Object.assign(frame.style, {
+      all: 'initial', position: 'absolute', boxSizing: 'border-box',
+      border: '2px dashed #4da3ff', pointerEvents: 'none', zIndex: '2147483641',
+    });
+    for (const d of HANDLE_DIRS) {
+      const hd = document.createElement('div');
+      hd.className = 'ocr-h';
+      hd.dataset.dir = d;
+      hd.dataset.fx = String(HANDLE_FX[d]);
+      hd.dataset.fy = String(HANDLE_FY[d]);
+      Object.assign(hd.style, {
+        all: 'initial', position: 'absolute', boxSizing: 'border-box', width: '10px', height: '10px',
+        transform: 'translate(-50%, -50%)', background: '#fff', border: '1px solid #4da3ff', borderRadius: '2px',
+        pointerEvents: 'auto', cursor: HANDLE_CURSOR[d],
+      });
+      hd.addEventListener('pointerdown', (e) => startResize(e, entry, idx, d));
+      frame.appendChild(hd);
+    }
+    // Move icon: top-left corner, inside the box so it does not clash with the nw resize handle
+    const mv = document.createElement('div');
+    mv.className = 'ocr-move';
+    Object.assign(mv.style, {
+      all: 'initial', position: 'absolute', left: '8px', top: '8px', width: '22px', height: '22px',
+      boxSizing: 'border-box', borderRadius: '6px', background: '#4da3ff', display: 'flex',
+      alignItems: 'center', justifyContent: 'center', pointerEvents: 'auto', cursor: 'move',
+      boxShadow: '0 1px 4px rgba(0,0,0,.35)',
+    });
+    mv.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M12 2v20M2 12h20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3"/></svg>';
+    mv.addEventListener('pointerdown', (e) => startResize(e, entry, idx, 'move'));
+    frame.appendChild(mv);
+    return frame;
+  }
+
+  // Place the frame and its handles on the selected box (called after every layout and during a drag)
+  function refreshSelection() {
+    if (!selected) return;
+    const { entry, idx } = selected;
+    if (overlayEntries.get(entry.srcUrl) !== entry) { deselectBox(); return; }
+    const box = entry.layer.querySelector(`[data-idx="${idx}"]`);
+    if (!box) { deselectBox(); return; }
+    if (!entry.selEl || !entry.selEl.isConnected) {
+      entry.selEl = buildSelection(entry, idx);
+      entry.layer.appendChild(entry.selEl);
+    }
+    const w = parseFloat(box.style.width), h = parseFloat(box.style.height);
+    Object.assign(entry.selEl.style, {
+      left: box.style.left, top: box.style.top, width: box.style.width, height: box.style.height,
+    });
+    for (const hd of entry.selEl.querySelectorAll('.ocr-h')) {
+      hd.style.left = (Number(hd.dataset.fx) * w) + 'px';
+      hd.style.top = (Number(hd.dataset.fy) * h) + 'px';
+    }
+  }
+
+  function startResize(e, entry, idx, dir) {
+    e.preventDefault();
+    e.stopPropagation();
+    const box = entry.layer.querySelector(`[data-idx="${idx}"]`);
+    if (!box) return;
+    const hd = e.currentTarget;
+    hd.setPointerCapture(e.pointerId);
+    const LW = parseFloat(entry.layer.style.width), LH = parseFloat(entry.layer.style.height);
+    const start = {
+      cx: e.clientX, cy: e.clientY,
+      x: parseFloat(box.style.left), y: parseFloat(box.style.top),
+      w: parseFloat(box.style.width), h: parseFloat(box.style.height),
+    };
+    const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+    let cur = { x: start.x, y: start.y, w: start.w, h: start.h };
+    const onMove = (ev) => {
+      const dx = ev.clientX - start.cx, dy = ev.clientY - start.cy;
+      if (dir === 'move') {
+        // Keep the size, stay inside the image
+        cur = {
+          x: clamp(start.x + dx, 0, LW - start.w),
+          y: clamp(start.y + dy, 0, LH - start.h),
+          w: start.w, h: start.h,
+        };
+      } else {
+        let L = start.x, R = start.x + start.w, T = start.y, B = start.y + start.h;
+        if (dir.includes('w')) L = clamp(start.x + dx, 0, R - MIN_BOX);
+        if (dir.includes('e')) R = clamp(start.x + start.w + dx, L + MIN_BOX, LW);
+        if (dir.includes('n')) T = clamp(start.y + dy, 0, B - MIN_BOX);
+        if (dir.includes('s')) B = clamp(start.y + start.h + dy, T + MIN_BOX, LH);
+        cur = { x: L, y: T, w: R - L, h: B - T };
+      }
+      Object.assign(box.style, { left: cur.x + 'px', top: cur.y + 'px', width: cur.w + 'px', height: cur.h + 'px' });
+      refreshSelection();
+    };
+    const onUp = () => {
+      hd.removeEventListener('pointermove', onMove);
+      hd.removeEventListener('pointerup', onUp);
+      hd.removeEventListener('pointercancel', onUp);
+      // Save the new geometry as fractions of the image, then rebuild the text so it fits the new size
+      entry.boxOverrides = entry.boxOverrides || {};
+      entry.boxOverrides[idx] = { x: cur.x / LW, y: cur.y / LH, w: cur.w / LW, h: cur.h / LH };
+      entry.sizeKey = '';
+      layoutOverlay(entry);
+      refreshSelection();
+    };
+    hd.addEventListener('pointermove', onMove);
+    hd.addEventListener('pointerup', onUp);
+    hd.addEventListener('pointercancel', onUp);
+  }
+
+  function onBoxPointerDown(e, entry, idx) {
+    e.stopPropagation();
+    if (selected && selected.entry === entry && selected.idx === idx) return;
+    selectBox(entry, idx);
+  }
+
+  // Click anywhere outside the translated boxes (and their handles): deselect
+  document.addEventListener('pointerdown', (e) => {
+    if (!selected) return;
+    if (e.target && e.target.closest && e.target.closest('.ocr-img-overlay')) return;
+    deselectBox();
+  }, true);
+
   function removeEntry(entry) {
     layoutObserver.unobserve(entry.img);
+    if (selected && selected.entry === entry) deselectBox();
     entry.layer.remove();
     if (entry.pin) { entry.pin.el.remove(); entry.pin = null; }
     if (entry.dlPin) { entry.dlPin.el.remove(); entry.dlPin = null; }
@@ -380,17 +543,21 @@
 
     layer.textContent = '';
     const pad = 2;
-    for (const it of items) {
+    for (let idx = 0; idx < items.length; idx++) {
+      const it = items[idx];
       if (!it.translated) continue;
       const ellipse = it.shape === 'ellipse';
       // Round bubble/oval: shrink by 1% so the original outline is still visible; the text box is taken from inside the ellipse
       const inset = ellipse ? 0.01 : 0;
       const bw = (it.box.x1 - it.box.x0) * sx;
       const bh = (it.box.y1 - it.box.y0) * sy;
-      const x = it.box.x0 * sx + (ellipse ? bw * inset : -pad);
-      const y = it.box.y0 * sy + (ellipse ? bh * inset : -pad);
-      const w = ellipse ? bw * (1 - 2 * inset) : bw + 2 * pad;
-      const h = ellipse ? bh * (1 - 2 * inset) : bh + 2 * pad;
+      let x = it.box.x0 * sx + (ellipse ? bw * inset : -pad);
+      let y = it.box.y0 * sy + (ellipse ? bh * inset : -pad);
+      let w = ellipse ? bw * (1 - 2 * inset) : bw + 2 * pad;
+      let h = ellipse ? bh * (1 - 2 * inset) : bh + 2 * pad;
+      // The user resized this box: use the saved geometry (fractions of the image size)
+      const ov = entry.boxOverrides && entry.boxOverrides[idx];
+      if (ov) { x = ov.x * rect.width; y = ov.y * rect.height; w = ov.w * rect.width; h = ov.h * rect.height; }
       if (w < 6 || h < 6) continue;
       // Text area: for an ellipse, use only the rectangle that fits inside it (~73%); for a rectangle, keep an even 7% margin
       // (minimum 6px) so the text does not touch or get clipped at the edges
@@ -424,6 +591,10 @@
         padding: `${my}px ${mx}px`,
       });
       layer.appendChild(div);
+      div.dataset.idx = String(idx);
+      div.style.pointerEvents = 'auto';
+      div.style.cursor = 'pointer';
+      div.addEventListener('pointerdown', (e) => onBoxPointerDown(e, entry, idx));
       // Original font size from Gemini as a cap (never larger than the original text); if absent, use the measured line spacing
       const cap = it.fontPx ? it.fontPx * sy : it.linePx ? it.linePx * sy * FONT_CAP : 0;
       fitText(div, it.translated, tw, th, cap);
@@ -433,6 +604,7 @@
   function layoutAllOverlays() {
     for (const entry of [...overlayEntries.values()]) layoutOverlay(entry);
     updateAllPendingPins();
+    refreshSelection();
   }
 
   function scheduleLayout() {
@@ -856,7 +1028,7 @@
     // Text boxes are laid out in the layer's display px; scale to the original image's pixels
     const layerW = parseFloat(entry.layer.style.width) || entry.img.getBoundingClientRect().width;
     const k = W / layerW;
-    for (const box of entry.layer.children) drawTextBox(ctx, box, k);
+    for (const box of entry.layer.children) if (box.dataset.idx !== undefined) drawTextBox(ctx, box, k);
     return await new Promise((resolve, reject) =>
       canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Không tạo được ảnh'))), 'image/png'));
   }
