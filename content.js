@@ -704,6 +704,16 @@
       box.removeEventListener('blur', onBlur);
       box.removeEventListener('keydown', onKey);
       document.removeEventListener('pointerdown', onDocDown, true);
+      const typed = save ? box.innerText.replace(/\n$/, '') : '';
+      const savedText = entry.textOverrides && entry.textOverrides[idx] != null ? entry.textOverrides[idx] : '';
+      if (isAddedBox(entry, idx) && (save ? !typed.trim() : !savedText.trim())) {
+        tb.remove();
+        removeAddedBox(entry, idx); // a new box without text is cancelled
+        entry.sizeKey = '';
+        layoutOverlay(entry);
+        refreshSelection();
+        return;
+      }
       if (save) {
         const text = box.innerText.replace(/\n$/, '');
         entry.textOverrides = entry.textOverrides || {};
@@ -755,6 +765,109 @@
     deselectBox();
   }, true);
 
+  // ---- Added subtitle boxes: drag a region on a translated image to create one ----
+  // Added boxes are stored in entry.addedBoxes with ids 'a1', 'a2', ...; their geometry lives in boxOverrides like the others.
+  const isAddedBox = (entry, id) => (entry.addedBoxes || []).some((a) => a.id === id);
+
+  function removeAddedBox(entry, id) {
+    entry.addedBoxes = (entry.addedBoxes || []).filter((a) => a.id !== id);
+    for (const store of [entry.boxOverrides, entry.textOverrides, entry.boxStyles, entry.deletedBoxes]) {
+      if (store) delete store[id];
+    }
+    if (selected && selected.entry === entry && selected.idx === id) deselectBox();
+  }
+
+  // The boxes to lay out: the ones from Gemini (numbered by their position) and the ones the user added
+  function layoutItems(entry) {
+    const list = (entry.items || []).map((it, i) => ({ ...it, key: i }));
+    for (const a of entry.addedBoxes || []) {
+      list.push({
+        key: a.id, added: true, translated: '', shape: 'rect',
+        box: { x0: 0, y0: 0, x1: entry.width, y1: entry.height }, // real position comes from boxOverrides
+        bg: { r: 255, g: 255, b: 255, dark: false },              // white background
+      });
+    }
+    return list;
+  }
+
+  function createAddedBox(entry, r, W, H) {
+    entry.addedSeq = (entry.addedSeq || 0) + 1;
+    const id = 'a' + entry.addedSeq;
+    entry.addedBoxes = [...(entry.addedBoxes || []), { id }];
+    entry.boxOverrides = { ...(entry.boxOverrides || {}), [id]: { x: r.x / W, y: r.y / H, w: r.w / W, h: r.h / H } };
+    entry.sizeKey = '';
+    layoutOverlay(entry);
+    selectBox(entry, id);
+    // Start typing straight away; the empty box is removed if nothing is typed
+    startTextEdit({ preventDefault() {}, stopPropagation() {} }, entry, id);
+  }
+
+  let drawing = null; // { entry, r, x0, y0, x1, y1, el } while the user drags a new box
+  const clampTo = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+
+  document.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const img = e.target;
+    if (!(img instanceof HTMLImageElement)) return;
+    const entry = [...overlayEntries.values()].find((en) => en.img === img && en.layer.style.display !== 'none');
+    if (!entry) return;
+    e.preventDefault(); // no native image drag
+    e.stopPropagation();
+    img.draggable = false;
+    deselectBox();
+    const r = img.getBoundingClientRect();
+    const x0 = clampTo(e.clientX - r.left, 0, r.width);
+    const y0 = clampTo(e.clientY - r.top, 0, r.height);
+    const el = document.createElement('div');
+    el.className = 'ocr-draw';
+    Object.assign(el.style, {
+      all: 'initial', position: 'absolute', left: x0 + 'px', top: y0 + 'px', width: '0px', height: '0px',
+      boxSizing: 'border-box', border: '2px dashed #4da3ff', background: 'rgba(77,163,255,.15)',
+      pointerEvents: 'none', zIndex: '2147483640',
+    });
+    entry.layer.appendChild(el);
+    drawing = { entry, r, x0, y0, x1: x0, y1: y0, el };
+  }, true);
+
+  document.addEventListener('pointermove', (e) => {
+    if (!drawing) return;
+    const d = drawing;
+    d.x1 = clampTo(e.clientX - d.r.left, 0, d.r.width);
+    d.y1 = clampTo(e.clientY - d.r.top, 0, d.r.height);
+    Object.assign(d.el.style, {
+      left: Math.min(d.x0, d.x1) + 'px', top: Math.min(d.y0, d.y1) + 'px',
+      width: Math.abs(d.x1 - d.x0) + 'px', height: Math.abs(d.y1 - d.y0) + 'px',
+    });
+  }, true);
+
+  const endDrawing = () => {
+    if (!drawing) return;
+    const d = drawing;
+    drawing = null;
+    d.el.remove();
+    const w = Math.abs(d.x1 - d.x0), h = Math.abs(d.y1 - d.y0);
+    if (w > 4 || h > 4) suppressClick = true;
+    window.getSelection()?.removeAllRanges();
+    if (w < 24 || h < 24) return; // a plain click, not a new box
+    createAddedBox(d.entry, { x: Math.min(d.x0, d.x1), y: Math.min(d.y0, d.y1), w, h }, d.r.width, d.r.height);
+  };
+  document.addEventListener('pointerup', endDrawing, true);
+  document.addEventListener('pointercancel', endDrawing, true);
+
+  // Pressing on an image and moving starts the browser's own image drag (the picture moves instead of a box being drawn)
+  document.addEventListener('dragstart', (e) => {
+    if (drawing || e.target instanceof HTMLImageElement) e.preventDefault();
+  }, true);
+
+  // A drag that drew a box must not also count as a click on the image (e.g. a link around it)
+  let suppressClick = false;
+  document.addEventListener('click', (e) => {
+    if (!suppressClick) return;
+    suppressClick = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
+
   // Confirm dialog (its own shadow root so the page's CSS does not affect it)
   function openDeleteConfirm(entry, idx) {
     const host = document.createElement('div');
@@ -803,6 +916,7 @@
   // Remove one translated box from the image (kept in the translation until the image is translated again)
   function deleteBox(entry, idx) {
     if (overlayEntries.get(entry.srcUrl) !== entry) return;
+    if (isAddedBox(entry, idx)) { removeAddedBox(entry, idx); entry.sizeKey = ''; layoutOverlay(entry); return; }
     entry.deletedBoxes = entry.deletedBoxes || {};
     entry.deletedBoxes[idx] = true;
     if (selected && selected.entry === entry && selected.idx === idx) deselectBox();
@@ -916,9 +1030,9 @@
 
     layer.textContent = '';
     const pad = 2;
-    for (let idx = 0; idx < items.length; idx++) {
-      const it = items[idx];
-      if (!it.translated) continue;
+    for (const it of layoutItems(entry)) {
+      const idx = it.key;
+      if (!it.translated && !it.added) continue; // added boxes start empty; the user types their text in
       if (entry.deletedBoxes && entry.deletedBoxes[idx]) continue; // removed by the user
       const stored = entry.boxStyles && entry.boxStyles[idx];
       const ellipse = stored && stored.shape ? stored.shape === 'ellipse' : it.shape === 'ellipse';

@@ -1,5 +1,5 @@
 --- orig_src/content.js	2026-11-16 04:13:22.806945572 +0000
-+++ src/content.js	2026-11-16 06:28:12.355307310 +0000
++++ src/content.js	2026-11-16 17:20:25.916157516 +0000
 @@ -1,5 +1,14 @@
  (() => {
 -  if (window.__ocrTranslateInjected) return;
@@ -120,7 +120,7 @@
      lines = wrapWords(text, w);
      div.style.fontSize = size + 'px';
      div.style.lineHeight = String(LINE_H);
-@@ -270,10 +332,490 @@
+@@ -270,10 +332,604 @@
      hostPosition.delete(host);
    }
  
@@ -496,6 +496,16 @@
 +      box.removeEventListener('blur', onBlur);
 +      box.removeEventListener('keydown', onKey);
 +      document.removeEventListener('pointerdown', onDocDown, true);
++      const typed = save ? box.innerText.replace(/\n$/, '') : '';
++      const savedText = entry.textOverrides && entry.textOverrides[idx] != null ? entry.textOverrides[idx] : '';
++      if (isAddedBox(entry, idx) && (save ? !typed.trim() : !savedText.trim())) {
++        tb.remove();
++        removeAddedBox(entry, idx); // a new box without text is cancelled
++        entry.sizeKey = '';
++        layoutOverlay(entry);
++        refreshSelection();
++        return;
++      }
 +      if (save) {
 +        const text = box.innerText.replace(/\n$/, '');
 +        entry.textOverrides = entry.textOverrides || {};
@@ -547,6 +557,109 @@
 +    deselectBox();
 +  }, true);
 +
++  // ---- Added subtitle boxes: drag a region on a translated image to create one ----
++  // Added boxes are stored in entry.addedBoxes with ids 'a1', 'a2', ...; their geometry lives in boxOverrides like the others.
++  const isAddedBox = (entry, id) => (entry.addedBoxes || []).some((a) => a.id === id);
++
++  function removeAddedBox(entry, id) {
++    entry.addedBoxes = (entry.addedBoxes || []).filter((a) => a.id !== id);
++    for (const store of [entry.boxOverrides, entry.textOverrides, entry.boxStyles, entry.deletedBoxes]) {
++      if (store) delete store[id];
++    }
++    if (selected && selected.entry === entry && selected.idx === id) deselectBox();
++  }
++
++  // The boxes to lay out: the ones from Gemini (numbered by their position) and the ones the user added
++  function layoutItems(entry) {
++    const list = (entry.items || []).map((it, i) => ({ ...it, key: i }));
++    for (const a of entry.addedBoxes || []) {
++      list.push({
++        key: a.id, added: true, translated: '', shape: 'rect',
++        box: { x0: 0, y0: 0, x1: entry.width, y1: entry.height }, // real position comes from boxOverrides
++        bg: { r: 255, g: 255, b: 255, dark: false },              // white background
++      });
++    }
++    return list;
++  }
++
++  function createAddedBox(entry, r, W, H) {
++    entry.addedSeq = (entry.addedSeq || 0) + 1;
++    const id = 'a' + entry.addedSeq;
++    entry.addedBoxes = [...(entry.addedBoxes || []), { id }];
++    entry.boxOverrides = { ...(entry.boxOverrides || {}), [id]: { x: r.x / W, y: r.y / H, w: r.w / W, h: r.h / H } };
++    entry.sizeKey = '';
++    layoutOverlay(entry);
++    selectBox(entry, id);
++    // Start typing straight away; the empty box is removed if nothing is typed
++    startTextEdit({ preventDefault() {}, stopPropagation() {} }, entry, id);
++  }
++
++  let drawing = null; // { entry, r, x0, y0, x1, y1, el } while the user drags a new box
++  const clampTo = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
++
++  document.addEventListener('pointerdown', (e) => {
++    if (e.button !== 0) return;
++    const img = e.target;
++    if (!(img instanceof HTMLImageElement)) return;
++    const entry = [...overlayEntries.values()].find((en) => en.img === img && en.layer.style.display !== 'none');
++    if (!entry) return;
++    e.preventDefault(); // no native image drag
++    e.stopPropagation();
++    img.draggable = false;
++    deselectBox();
++    const r = img.getBoundingClientRect();
++    const x0 = clampTo(e.clientX - r.left, 0, r.width);
++    const y0 = clampTo(e.clientY - r.top, 0, r.height);
++    const el = document.createElement('div');
++    el.className = 'ocr-draw';
++    Object.assign(el.style, {
++      all: 'initial', position: 'absolute', left: x0 + 'px', top: y0 + 'px', width: '0px', height: '0px',
++      boxSizing: 'border-box', border: '2px dashed #4da3ff', background: 'rgba(77,163,255,.15)',
++      pointerEvents: 'none', zIndex: '2147483640',
++    });
++    entry.layer.appendChild(el);
++    drawing = { entry, r, x0, y0, x1: x0, y1: y0, el };
++  }, true);
++
++  document.addEventListener('pointermove', (e) => {
++    if (!drawing) return;
++    const d = drawing;
++    d.x1 = clampTo(e.clientX - d.r.left, 0, d.r.width);
++    d.y1 = clampTo(e.clientY - d.r.top, 0, d.r.height);
++    Object.assign(d.el.style, {
++      left: Math.min(d.x0, d.x1) + 'px', top: Math.min(d.y0, d.y1) + 'px',
++      width: Math.abs(d.x1 - d.x0) + 'px', height: Math.abs(d.y1 - d.y0) + 'px',
++    });
++  }, true);
++
++  const endDrawing = () => {
++    if (!drawing) return;
++    const d = drawing;
++    drawing = null;
++    d.el.remove();
++    const w = Math.abs(d.x1 - d.x0), h = Math.abs(d.y1 - d.y0);
++    if (w > 4 || h > 4) suppressClick = true;
++    window.getSelection()?.removeAllRanges();
++    if (w < 24 || h < 24) return; // a plain click, not a new box
++    createAddedBox(d.entry, { x: Math.min(d.x0, d.x1), y: Math.min(d.y0, d.y1), w, h }, d.r.width, d.r.height);
++  };
++  document.addEventListener('pointerup', endDrawing, true);
++  document.addEventListener('pointercancel', endDrawing, true);
++
++  // Pressing on an image and moving starts the browser's own image drag (the picture moves instead of a box being drawn)
++  document.addEventListener('dragstart', (e) => {
++    if (drawing || e.target instanceof HTMLImageElement) e.preventDefault();
++  }, true);
++
++  // A drag that drew a box must not also count as a click on the image (e.g. a link around it)
++  let suppressClick = false;
++  document.addEventListener('click', (e) => {
++    if (!suppressClick) return;
++    suppressClick = false;
++    e.preventDefault();
++    e.stopPropagation();
++  }, true);
++
 +  // Confirm dialog (its own shadow root so the page's CSS does not affect it)
 +  function openDeleteConfirm(entry, idx) {
 +    const host = document.createElement('div');
@@ -595,6 +708,7 @@
 +  // Remove one translated box from the image (kept in the translation until the image is translated again)
 +  function deleteBox(entry, idx) {
 +    if (overlayEntries.get(entry.srcUrl) !== entry) return;
++    if (isAddedBox(entry, idx)) { removeAddedBox(entry, idx); entry.sizeKey = ''; layoutOverlay(entry); return; }
 +    entry.deletedBoxes = entry.deletedBoxes || {};
 +    entry.deletedBoxes[idx] = true;
 +    if (selected && selected.entry === entry && selected.idx === idx) deselectBox();
@@ -611,7 +725,7 @@
      overlayEntries.delete(entry.srcUrl);
      releaseHost(entry.host);
    }
-@@ -323,7 +865,7 @@
+@@ -323,7 +979,7 @@
        } else {
          if (overlayEntries.get(entry.srcUrl) === entry) { // not removed for aspect-ratio reasons: hide temporarily and retry later
            layer.style.display = 'none';
@@ -620,15 +734,16 @@
          }
          return;
        }
-@@ -374,17 +916,23 @@
+@@ -374,17 +1030,23 @@
  
      layer.textContent = '';
      const pad = 2;
 -    for (const it of items) {
-+    for (let idx = 0; idx < items.length; idx++) {
-+      const it = items[idx];
-       if (!it.translated) continue;
+-      if (!it.translated) continue;
 -      const ellipse = it.shape === 'ellipse';
++    for (const it of layoutItems(entry)) {
++      const idx = it.key;
++      if (!it.translated && !it.added) continue; // added boxes start empty; the user types their text in
 +      if (entry.deletedBoxes && entry.deletedBoxes[idx]) continue; // removed by the user
 +      const stored = entry.boxStyles && entry.boxStyles[idx];
 +      const ellipse = stored && stored.shape ? stored.shape === 'ellipse' : it.shape === 'ellipse';
@@ -650,7 +765,7 @@
        if (w < 6 || h < 6) continue;
        // Text area: for an ellipse, use only the rectangle that fits inside it (~73%); for a rectangle, keep an even 7% margin
        // (minimum 6px) so the text does not touch or get clipped at the edges
-@@ -418,15 +966,25 @@
+@@ -418,15 +1080,25 @@
          padding: `${my}px ${mx}px`,
        });
        layer.appendChild(div);
@@ -677,7 +792,7 @@
    }
  
    function scheduleLayout() {
-@@ -636,9 +1194,10 @@
+@@ -636,9 +1308,10 @@
      .pill{position:fixed;display:none;align-items:center;gap:8px;height:34px;padding:0 14px 0 5px;border:0;
        border-radius:999px;background:#fff;color:#2a3347;font:600 14px/1 system-ui,"Segoe UI",Roboto,sans-serif;
        box-shadow:0 2px 10px rgba(0,0,0,.3);cursor:pointer;pointer-events:auto;white-space:nowrap;
@@ -689,7 +804,7 @@
      .pill:hover{box-shadow:0 3px 14px rgba(0,0,0,.4)}
      .pill[data-state=loading]{cursor:progress}
      .ico{display:flex;width:24px;height:24px}
-@@ -734,11 +1293,11 @@
+@@ -734,11 +1407,11 @@
    function updatePin(entry) {
      const v = visibleRect(entry.img);
      if (pendingUrls.has(entry.srcUrl)) { // translating again: the spinning icon replaces this button
@@ -703,7 +818,7 @@
        return;
      }
      const pin = ensurePin(entry);
-@@ -747,8 +1306,9 @@
+@@ -747,8 +1420,9 @@
      pin.label.textContent = BTN_TEXT[state];
      pin.el.title = state === 'shown' ? 'Bấm để xem ảnh gốc' : 'Bấm để xem bản dịch';
      setBtnShown(pin.el, true);
@@ -714,7 +829,7 @@
      // Just translated and the button is visible: flash exactly once. When overlayImage runs the button is still hidden
      // (pendingUrls not yet cleared), so the flash is deferred until the first updatePin where the button is actually shown.
      if (entry.flashUntil && !entry.flashed) {
-@@ -757,6 +1317,123 @@
+@@ -757,6 +1431,123 @@
      }
    }
  
@@ -838,7 +953,7 @@
    // Just translated: the button flashes and bounces a few times to get attention, then stays still
    function flashPin(entry) {
      const el = entry.pin && entry.pin.el;
-@@ -803,7 +1480,7 @@
+@@ -803,7 +1594,7 @@
        return;
      }
      setBtnShown(p.btn.el, true);
@@ -847,7 +962,7 @@
      p.btn.el.style.top = v.t + 10 + 'px';
    }
  
-@@ -932,7 +1609,7 @@
+@@ -932,7 +1723,7 @@
      const place = () => {
        const v = visibleRect(img);
        if (v.r - v.l < BTN_MIN || v.b - v.t < 40) return false;
