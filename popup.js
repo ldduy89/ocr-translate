@@ -95,7 +95,7 @@ const TARGET_OPTIONS = [
   ["la", "Tiếng Latinh"],
 ];
 
-const DEFAULTS = { targetLang: 'vi' };
+const DEFAULTS = { targetLang: 'vi', subFont: 'manga' };
 const $ = (id) => document.getElementById(id);
 const listEl = $('list');
 const countEl = $('count');
@@ -199,6 +199,76 @@ function openModal(modalEl, fromBtn) {
   }
   modalEl.classList.add('show');
 }
+
+// ---------- Subtitle font: same picker as the target language ----------
+const SUB_FONTS = [['manga', 'Anime Ace 3 BB (manga)'], ['system', 'Mặc định (hệ thống)']];
+const fontBox = $('fontBox');
+const fontInput = $('fontInput');
+const fontList = $('fontList');
+let fontValue = DEFAULTS.subFont;
+
+function fontLabel(id) {
+  const hit = SUB_FONTS.find(([v]) => v === id);
+  return hit ? hit[1] : id;
+}
+
+function renderFontList(filter = '') {
+  const q = filter.trim().toLowerCase();
+  const shown = SUB_FONTS.filter(([v, label]) => !q || label.toLowerCase().includes(q) || v.toLowerCase().includes(q));
+  fontList.innerHTML = '';
+  if (!shown.length) {
+    const empty = document.createElement('div');
+    empty.className = 'lang-empty';
+    empty.textContent = 'Không có font phù hợp';
+    fontList.appendChild(empty);
+    return;
+  }
+  for (const [v, label] of shown) {
+    const row = document.createElement('div');
+    row.className = 'lang-item' + (v === fontValue ? ' sel' : '');
+    row.textContent = label;
+    // mousedown (not click) so the font is picked before the search box loses focus
+    row.onmousedown = (e) => { e.preventDefault(); pickFont(v); };
+    fontList.appendChild(row);
+  }
+}
+
+function openFont() {
+  fontInput.value = '';
+  fontInput.placeholder = fontLabel(fontValue);
+  renderFontList('');
+  fontBox.classList.add('open');
+}
+
+function closeFont() {
+  fontBox.classList.remove('open');
+  fontInput.placeholder = '';
+  fontInput.value = fontLabel(fontValue);
+}
+
+function pickFont(id) {
+  fontValue = id;
+  chrome.storage.sync.set({ subFont: id });
+  fontInput.blur();
+}
+
+fontInput.onfocus = openFont;
+fontInput.oninput = () => renderFontList(fontInput.value);
+fontInput.onblur = closeFont;
+fontInput.onkeydown = (e) => {
+  if (e.key === 'Escape') fontInput.blur();
+  if (e.key === 'Enter') {
+    const first = fontList.querySelector('.lang-item');
+    if (first) first.dispatchEvent(new MouseEvent('mousedown'));
+  }
+};
+document.querySelector('#fontBox .lang-icon').style.pointerEvents = 'auto';
+document.querySelector('#fontBox .lang-icon').onclick = () => fontInput.focus();
+
+chrome.storage.sync.get({ subFont: DEFAULTS.subFont }).then((s) => {
+  fontValue = SUB_FONTS.some(([v]) => v === s.subFont) ? s.subFont : DEFAULTS.subFont;
+  fontInput.value = fontLabel(fontValue);
+});
 
 $('settings').onclick = () => openModal(modal, $('settings'));
 $('closeSettings').onclick = () => modal.classList.remove('show');

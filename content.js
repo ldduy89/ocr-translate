@@ -42,7 +42,7 @@
   });
 
   // ---------- Watch for image changes on the page -> tell the side panel to refresh its list ----------
-  const OWN_SELECTOR = '#ocr-pill-host, #ocr-dock-host, #ocr-page-panel-host, .ocr-img-overlay, #ocr-panel, #ocr-toast';
+  const OWN_SELECTOR = '#ocr-pill-host, #ocr-dock-host, #ocr-page-panel-host, .ocr-img-overlay, #ocr-panel, #ocr-toast, #ocr-confirm-host';
   function isOwnNode(n) {
     const el = n && n.nodeType === 1 ? n : (n && n.parentElement);
     return !!(el && el.closest && el.closest(OWN_SELECTOR));
@@ -186,26 +186,54 @@
   }
 
   // Measure with canvas: wrap lines to the box width, then pick the largest font size that fits
-  // Manga lettering font (Anime Ace 3 BB Italic, bundled in fonts/). Loaded from the extension's bytes, so the page's CSP does not block it.
-  // Until it loads (or if it fails), the system font is used.
-  const FONT_FAMILY = 'MangaSubFont, system-ui, "Segoe UI", Roboto, sans-serif';
-  const mangaFontReady = (async () => {
-    try {
-      const buf = await (await fetch(chrome.runtime.getURL('fonts/AnimeAce3BB-Italic.ttf'))).arrayBuffer();
-      const ff = new FontFace('MangaSubFont', buf);
-      await ff.load();
-      document.fonts.add(ff);
-      return true;
-    } catch (err) {
-      console.warn('[OCR] không nạp được font manga, dùng font hệ thống', err);
-      return false;
+  // Font for the subtitle text. The user picks it in Settings (saved in chrome.storage.sync as subFont).
+  // "manga" uses the bundled Anime Ace 3 BB Italic file; "system" uses the page's default fonts.
+  const FONT_OPTIONS = {
+    manga:  { family: 'MangaSubFont, system-ui, "Segoe UI", Roboto, sans-serif', file: 'fonts/AnimeAce3BB-Italic.ttf', name: 'MangaSubFont' },
+    system: { family: 'system-ui, "Segoe UI", Roboto, sans-serif', file: null },
+  };
+  let FONT_FAMILY = FONT_OPTIONS.manga.family; // used for measuring, drawing and the text boxes
+  let subFontId = 'manga'; // id of the font chosen in Settings
+  const fontLoads = new Map(); // font id -> promise (each file is loaded once)
+
+  // Loads the font file from the extension's bytes (not blocked by the page's CSP). Resolves true when the font is usable.
+  function ensureFont(id) {
+    const opt = FONT_OPTIONS[id];
+    if (!opt || !opt.file) return Promise.resolve(true);
+    if (!fontLoads.has(id)) {
+      fontLoads.set(id, (async () => {
+        try {
+          const buf = await (await fetch(chrome.runtime.getURL(opt.file))).arrayBuffer();
+          const ff = new FontFace(opt.name, buf);
+          await ff.load();
+          document.fonts.add(ff);
+          return true;
+        } catch (err) {
+          console.warn('[OCR] không nạp được font, dùng font hệ thống', id, err);
+          return false;
+        }
+      })());
     }
-  })();
-  // Text was measured with the fallback font: lay out every translation again once the manga font is ready
-  mangaFontReady.then((ok) => {
-    if (!ok) return;
+    return fontLoads.get(id);
+  }
+
+  // Lay out every translation again (text was measured with the previous font)
+  function relayoutAll() {
     for (const e of overlayEntries.values()) { e.sizeKey = ''; layoutOverlay(e); }
     refreshSelection();
+  }
+
+  function applySubFont(id) {
+    const opt = FONT_OPTIONS[id] || FONT_OPTIONS.manga;
+    subFontId = FONT_OPTIONS[id] ? id : 'manga';
+    FONT_FAMILY = opt.family;
+    relayoutAll(); // show it right away with the fallback until the file is loaded
+    ensureFont(id).then((ok) => { if (ok && FONT_FAMILY === opt.family) relayoutAll(); });
+  }
+
+  chrome.storage.sync.get({ subFont: 'manga' }).then((st) => applySubFont(st.subFont));
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'sync' && changes.subFont) applySubFont(changes.subFont.newValue);
   });
   let measureCtx = null;
 
@@ -239,14 +267,14 @@
     let lines = [];
     let fitted = false;
     for (; size >= MIN_FONT; size--) {
-      measureCtx.font = `${size}px ${FONT_FAMILY}`;
+      measureCtx.font = `${div.style.fontStyle} ${div.style.fontWeight} ${size}px ${div.style.fontFamily}`;
       lines = wrapWords(text, w);
       const fitsHeight = lines.length * size * LINE_H <= h + 1;
       const fitsWidth = lines.every((l) => measureCtx.measureText(l).width <= w + 1);
       if (fitsHeight && fitsWidth) { fitted = true; break; }
     }
     if (!fitted) size = MIN_FONT; // really does not fit: use the smallest size and accept a slight overflow
-    measureCtx.font = `${size}px ${FONT_FAMILY}`;
+    measureCtx.font = `${div.style.fontStyle} ${div.style.fontWeight} ${size}px ${div.style.fontFamily}`;
     lines = wrapWords(text, w);
     div.style.fontSize = size + 'px';
     div.style.lineHeight = String(LINE_H);
@@ -339,19 +367,20 @@
       hd.addEventListener('pointerdown', (e) => startResize(e, entry, idx, d));
       frame.appendChild(hd);
     }
-    // Move icon: top-left corner, inside the box so it does not clash with the nw resize handle
-    const mv = document.createElement('div');
-    mv.className = 'ocr-move';
-    Object.assign(mv.style, {
-      all: 'initial', position: 'absolute', left: '8px', top: '8px', width: '22px', height: '22px',
-      boxSizing: 'border-box', borderRadius: '6px', background: '#4da3ff', display: 'flex',
-      alignItems: 'center', justifyContent: 'center', pointerEvents: 'auto', cursor: 'move',
+    // Delete icon: top-right corner, inside the box
+    const del = document.createElement('div');
+    del.className = 'ocr-del';
+    Object.assign(del.style, {
+      all: 'initial', position: 'absolute', right: '8px', top: '8px', width: '22px', height: '22px',
+      boxSizing: 'border-box', borderRadius: '6px', background: '#e06c75', display: 'flex',
+      alignItems: 'center', justifyContent: 'center', pointerEvents: 'auto', cursor: 'pointer',
       boxShadow: '0 1px 4px rgba(0,0,0,.35)',
     });
-    mv.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-      '<path d="M12 2v20M2 12h20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3"/></svg>';
-    mv.addEventListener('pointerdown', (e) => startResize(e, entry, idx, 'move'));
-    frame.appendChild(mv);
+    del.title = 'Xóa khung sub';
+    del.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg>';
+    del.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); });
+    del.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openDeleteConfirm(entry, idx); });
+    frame.appendChild(del);
     return frame;
   }
 
@@ -431,17 +460,212 @@
     hd.addEventListener('pointercancel', onUp);
   }
 
-  // Double-click a translated box: edit its text in place. Enter (or click outside) saves, Shift+Enter adds a line, Esc cancels.
+  // Apply a box's style (font, colour, weight, italic) to its element. With no saved style, the global font and default colour are used.
+  function styleBox(box, st) {
+    const font = st && st.font && FONT_OPTIONS[st.font] ? st.font : subFontId;
+    box.style.fontFamily = FONT_OPTIONS[font].family;
+    box.style.color = (st && st.color) || box.dataset.defColor || '#000000';
+    box.style.fontWeight = (st && st.weight) || '400';
+    box.style.fontStyle = st && st.italic ? 'italic' : 'normal';
+  }
+
+  // Double-click a translated box: edit its text and style. A toolbar above the box changes font, colour, weight and italic.
+  // Enter (or click outside) saves, Shift+Enter adds a line, Esc cancels text and style changes.
   function startTextEdit(e, entry, idx) {
     e.preventDefault();
     e.stopPropagation();
     const box = entry.layer.querySelector(`[data-idx="${idx}"]`);
     if (!box || box.isContentEditable) return;
-    const original = box.textContent;
+    const prevStyle = entry.boxStyles && entry.boxStyles[idx] ? { ...entry.boxStyles[idx] } : null;
+    let st = { ...(prevStyle || {}) };
+    let done = false;
+
     box.contentEditable = 'true';
     box.style.cursor = 'text';
     box.style.outline = '2px solid #4da3ff';
     box.style.userSelect = 'text';
+
+    const setStyle = (patch) => {
+      st = { ...st, ...patch };
+      entry.boxStyles = entry.boxStyles || {};
+      entry.boxStyles[idx] = { ...st };
+      styleBox(box, st); // live preview; the text is fitted again when editing ends
+    };
+
+    // ---- toolbar above the box ----
+    const tb = document.createElement('div');
+    tb.className = 'ocr-tb';
+    Object.assign(tb.style, {
+      all: 'initial', position: 'absolute', display: 'flex', alignItems: 'center', gap: '6px',
+      padding: '6px 8px', background: '#2c313a', borderRadius: '10px', boxShadow: '0 4px 14px rgba(0,0,0,.35)',
+      zIndex: '2147483642', pointerEvents: 'auto', font: '12px system-ui,"Segoe UI",sans-serif',
+      color: '#dcdfe4', whiteSpace: 'nowrap',
+    });
+    tb.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+
+    // Dropdown styled like the language picker: a closed trigger and a dark list (no search box)
+    let openList = null; // only one list is open at a time
+    const mkDropdown = (opts, value, onChange) => {
+      const FONT = '12px system-ui,"Segoe UI",sans-serif';
+      const wrap = document.createElement('div');
+      Object.assign(wrap.style, { all: 'initial', position: 'relative', display: 'inline-block' });
+
+      const trigger = document.createElement('div');
+      const lbl = document.createElement('span');
+      const arrow = document.createElement('span');
+      arrow.innerHTML = '<svg width="8" height="5" viewBox="0 0 8 5" aria-hidden="true"><path d="M0 0h8L4 5z" fill="#aab1bf"/></svg>';
+      Object.assign(arrow.style, { all: 'initial', display: 'inline-flex', alignItems: 'center' });
+      Object.assign(trigger.style, {
+        all: 'initial', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px',
+        boxSizing: 'border-box', height: '26px', minWidth: '84px', padding: '0 8px', borderRadius: '6px',
+        background: '#1e2228', border: '1px solid #3a3f4b', color: '#dcdfe4', font: FONT,
+        cursor: 'pointer', whiteSpace: 'nowrap', userSelect: 'none',
+      });
+      trigger.append(lbl, arrow);
+
+      const list = document.createElement('div');
+      Object.assign(list.style, {
+        all: 'initial', display: 'none', position: 'absolute', left: '0', top: 'calc(100% + 4px)',
+        minWidth: '100%', boxSizing: 'border-box', background: '#2c313a', border: '1px solid #3a3f4b',
+        borderRadius: '8px', boxShadow: '0 10px 24px rgba(0,0,0,.45)', padding: '4px 0',
+        zIndex: '2147483643', font: FONT, color: '#dcdfe4',
+      });
+
+      const rows = [];
+      const paint = () => {
+        const hit = opts.find(([v]) => v === value) || opts[0];
+        lbl.textContent = hit[1];
+        for (const [row, v] of rows) {
+          row.style.color = v === value ? '#61afef' : '#dcdfe4';
+          row.style.fontWeight = v === value ? '600' : '400';
+        }
+      };
+      for (const [v, label] of opts) {
+        const row = document.createElement('div');
+        row.textContent = label;
+        Object.assign(row.style, {
+          all: 'initial', display: 'block', padding: '6px 10px', whiteSpace: 'nowrap',
+          cursor: 'pointer', font: FONT,
+        });
+        row.onmouseenter = () => { row.style.background = '#3f4653'; };
+        row.onmouseleave = () => { row.style.background = ''; };
+        row.addEventListener('mousedown', (ev) => ev.preventDefault()); // keep focus in the text
+        row.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          value = v;
+          paint();
+          list.style.display = 'none';
+          openList = null;
+          onChange(v);
+        });
+        rows.push([row, v]);
+        list.appendChild(row);
+      }
+      paint();
+
+      trigger.addEventListener('mousedown', (ev) => ev.preventDefault());
+      trigger.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const willOpen = list.style.display === 'none';
+        if (openList && openList !== list) openList.style.display = 'none';
+        list.style.display = willOpen ? 'block' : 'none';
+        openList = willOpen ? list : null;
+      });
+
+      wrap.append(trigger, list);
+      return wrap;
+    };
+
+    const fontSel = mkDropdown([['manga', 'Manga'], ['system', 'Hệ thống']], st.font || subFontId, (v) => {
+      setStyle({ font: v });
+      ensureFont(v).then(() => styleBox(box, st)); // the file may still be loading
+      box.focus();
+    });
+    const boldBtn = document.createElement('button');
+    boldBtn.type = 'button';
+    boldBtn.textContent = 'B';
+    const isBold = () => st.weight === '700';
+    const paintBold = () => {
+      const on = isBold();
+      Object.assign(boldBtn.style, {
+        all: 'initial', display: 'inline-block', boxSizing: 'border-box', width: '26px', height: '26px',
+        margin: '0', borderRadius: '6px', border: '1px solid ' + (on ? '#4da3ff' : '#3a3f4b'),
+        cursor: 'pointer', textAlign: 'center', lineHeight: '24px',
+        font: '800 13px system-ui,sans-serif',
+        background: on ? '#4da3ff' : '#1e2228', color: on ? '#fff' : '#dcdfe4',
+      });
+    };
+    paintBold();
+    boldBtn.addEventListener('mousedown', (ev) => ev.preventDefault()); // keep focus in the text
+    boldBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      setStyle({ weight: isBold() ? '400' : '700' }); // bold on, then back to normal
+      paintBold();
+    });
+
+    // Text colour: an "A" with a bar in the current colour. The whole control opens the colour picker.
+    const colorInput = document.createElement('input');
+    colorInput.type = 'color';
+    colorInput.value = st.color || box.dataset.defColor || '#000000';
+    Object.assign(colorInput.style, {
+      all: 'initial', position: 'absolute', left: '0', top: '0', width: '100%', height: '100%',
+      margin: '0', padding: '0', border: '0', opacity: '0', cursor: 'pointer',
+    });
+    const color = document.createElement('div');
+    const colorA = document.createElement('span');
+    colorA.textContent = 'A';
+    const colorBar = document.createElement('span');
+    Object.assign(colorBar.style, {
+      all: 'initial', display: 'block', width: '14px', height: '3px', marginTop: '1px',
+      borderRadius: '1px', background: colorInput.value,
+    });
+    Object.assign(color.style, {
+      all: 'initial', position: 'relative', display: 'inline-flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', width: '26px', height: '26px',
+      margin: '0', borderRadius: '6px', border: '1px solid #3a3f4b', background: '#1e2228', cursor: 'pointer',
+      color: '#dcdfe4', font: '700 14px system-ui,sans-serif', lineHeight: '1',
+    });
+    colorInput.addEventListener('input', () => {
+      setStyle({ color: colorInput.value });
+      colorBar.style.background = colorInput.value;
+    });
+    color.append(colorA, colorBar, colorInput);
+
+    const italicBtn = document.createElement('button');
+    italicBtn.type = 'button';
+    italicBtn.textContent = 'I';
+    const paintItalic = () => {
+      const on = !!st.italic;
+      Object.assign(italicBtn.style, {
+        all: 'initial', display: 'inline-block', boxSizing: 'border-box', width: '26px', height: '26px',
+        margin: '0', borderRadius: '6px', border: '1px solid ' + (on ? '#4da3ff' : '#3a3f4b'),
+        cursor: 'pointer', textAlign: 'center', lineHeight: '24px',
+        font: 'italic 700 13px system-ui,sans-serif',
+        background: on ? '#4da3ff' : '#1e2228', color: on ? '#fff' : '#dcdfe4',
+      });
+    };
+    paintItalic();
+    italicBtn.addEventListener('mousedown', (ev) => ev.preventDefault()); // keep focus in the text
+    italicBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      setStyle({ italic: !st.italic });
+      paintItalic();
+    });
+
+    const sep = document.createElement('div');
+    Object.assign(sep.style, { all: 'initial', display: 'inline-block', width: '1px', height: '18px', background: '#3a3f4b', margin: '0 2px' });
+    tb.append(fontSel, boldBtn, italicBtn, sep, color);
+    entry.layer.appendChild(tb);
+    // Above the box, or below it when there is no room above
+    const bx = parseFloat(box.style.left), by = parseFloat(box.style.top), bh = parseFloat(box.style.height);
+    let ty = by - tb.offsetHeight - 6;
+    if (ty < 0) ty = by + bh + 6;
+    tb.style.left = Math.max(0, bx) + 'px';
+    tb.style.top = ty + 'px';
+
+    // Select the whole text so typing replaces it
     box.focus();
     const range = document.createRange();
     range.selectNodeContents(box);
@@ -450,29 +674,43 @@
     sel.addRange(range);
 
     const finish = (save) => {
+      if (done) return;
+      done = true;
       box.removeEventListener('blur', onBlur);
       box.removeEventListener('keydown', onKey);
+      document.removeEventListener('pointerdown', onDocDown, true);
       if (save) {
         const text = box.innerText.replace(/\n$/, '');
         entry.textOverrides = entry.textOverrides || {};
         entry.textOverrides[idx] = text;
-        entry.sizeKey = ''; // rebuild the box so the text is fitted again
-        layoutOverlay(entry);
-        refreshSelection();
-      } else {
-        box.contentEditable = 'false';
-        box.textContent = original;
-        box.style.outline = '';
+      } else if (prevStyle) {
+        entry.boxStyles[idx] = prevStyle; // cancel: go back to the previous style
+      } else if (entry.boxStyles) {
+        delete entry.boxStyles[idx];
       }
+      tb.remove();
+      entry.sizeKey = ''; // rebuild the box with the saved text and style
+      layoutOverlay(entry);
+      refreshSelection();
     };
-    const onBlur = () => finish(true);
+    // Focus moving to the toolbar (font, weight, colour) is not the end of editing
+    const onBlur = (ev) => {
+      if (ev.relatedTarget && tb.contains(ev.relatedTarget)) return;
+      finish(true);
+    };
     const onKey = (ev) => {
       ev.stopPropagation(); // keys typed in the box must not trigger page shortcuts
       if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
       else if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); finish(true); }
     };
+    // Clicking anywhere outside the box and its toolbar saves
+    const onDocDown = (ev) => {
+      if (tb.contains(ev.target) || box.contains(ev.target)) return;
+      finish(true);
+    };
     box.addEventListener('blur', onBlur);
     box.addEventListener('keydown', onKey);
+    document.addEventListener('pointerdown', onDocDown, true);
   }
 
   // Press anywhere on the box (including over the text) and drag to move it. Selects the box if it is not selected yet.
@@ -491,6 +729,61 @@
     if (e.target && e.target.closest && e.target.closest('.ocr-img-overlay')) return;
     deselectBox();
   }, true);
+
+  // Confirm dialog (its own shadow root so the page's CSS does not affect it)
+  function openDeleteConfirm(entry, idx) {
+    const host = document.createElement('div');
+    host.id = 'ocr-confirm-host';
+    host.style.cssText = 'all:initial;position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;';
+    const root = host.attachShadow({ mode: 'closed' });
+    const st = document.createElement('style');
+    st.textContent = `
+      .bg{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;font:14px/1.45 system-ui,"Segoe UI",sans-serif;opacity:0;transition:opacity .18s ease;}
+      .bg.show{opacity:1;}
+      .dlg{background:#fff;color:#111;border-radius:10px;padding:18px 20px;width:300px;box-sizing:border-box;box-shadow:0 12px 36px rgba(0,0,0,.35);transform:scale(.92);transition:transform .18s ease;}
+      .bg.show .dlg{transform:scale(1);}
+      .t{font-weight:600;font-size:15px;margin-bottom:8px;}
+      .m{color:#555;margin-bottom:16px;}
+      .row{display:flex;justify-content:flex-end;gap:8px;}
+      button{font:inherit;border:0;border-radius:6px;padding:7px 14px;cursor:pointer;}
+      .no{background:#eef0f3;color:#222;}
+      .yes{background:#e06c75;color:#fff;}`;
+    root.appendChild(st);
+    const bg = document.createElement('div');
+    bg.className = 'bg';
+    bg.innerHTML = '<div class="dlg" role="dialog" aria-modal="true">' +
+      '<div class="t">Xóa khung sub này?</div>' +
+      '<div class="m">Khung sub sẽ bị xóa khỏi ảnh đã dịch.</div>' +
+      '<div class="row"><button class="no" type="button">Hủy</button><button class="yes" type="button">Xóa</button></div></div>';
+    root.appendChild(bg);
+    let closing = false;
+    const close = () => {
+      if (closing) return;
+      closing = true;
+      document.removeEventListener('keydown', onKey, true);
+      deselectBox(); // cancelling must not leave the box in drag mode
+      bg.classList.remove('show');
+      setTimeout(() => host.remove(), 180); // wait for the fade-out to finish
+    };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    bg.querySelector('.no').onclick = close;
+    bg.querySelector('.yes').onclick = () => { close(); deleteBox(entry, idx); };
+    bg.onclick = (e) => { if (e.target === bg) close(); };
+    document.addEventListener('keydown', onKey, true);
+    (document.body || document.documentElement).appendChild(host);
+    deselectBox(); // the box is not in drag mode while the dialog is open
+    requestAnimationFrame(() => bg.classList.add('show'));
+  }
+
+  // Remove one translated box from the image (kept in the translation until the image is translated again)
+  function deleteBox(entry, idx) {
+    if (overlayEntries.get(entry.srcUrl) !== entry) return;
+    entry.deletedBoxes = entry.deletedBoxes || {};
+    entry.deletedBoxes[idx] = true;
+    if (selected && selected.entry === entry && selected.idx === idx) deselectBox();
+    entry.sizeKey = '';
+    layoutOverlay(entry);
+  }
 
   function removeEntry(entry) {
     layoutObserver.unobserve(entry.img);
@@ -601,6 +894,7 @@
     for (let idx = 0; idx < items.length; idx++) {
       const it = items[idx];
       if (!it.translated) continue;
+      if (entry.deletedBoxes && entry.deletedBoxes[idx]) continue; // removed by the user
       const ellipse = it.shape === 'ellipse';
       // Round bubble/oval: shrink by 1% so the original outline is still visible; the text box is taken from inside the ellipse
       const inset = ellipse ? 0.01 : 0;
@@ -653,6 +947,8 @@
       div.addEventListener('dblclick', (e) => startTextEdit(e, entry, idx));
       // Original font size from Gemini as a cap (never larger than the original text); if absent, use the measured line spacing
       const cap = it.fontPx ? it.fontPx * sy : it.linePx ? it.linePx * sy * FONT_CAP : 0;
+      div.dataset.defColor = it.bg.dark ? '#ffffff' : '#000000';
+      styleBox(div, entry.boxStyles && entry.boxStyles[idx]);
       const text = entry.textOverrides && entry.textOverrides[idx] != null ? entry.textOverrides[idx] : it.translated;
       fitText(div, text, tw, th, cap);
     }
@@ -1065,7 +1361,7 @@
     }
     ctx.fill();
     ctx.fillStyle = box.style.color || '#000';
-    ctx.font = `${fs}px ${FONT_FAMILY}`;
+    ctx.font = `${box.style.fontStyle} ${box.style.fontWeight} ${fs}px ${box.style.fontFamily}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     const lines = box.textContent.split('\n');
