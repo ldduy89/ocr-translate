@@ -492,17 +492,7 @@ function buildItem(b, raw, bubble, data, W, H, clipY, strict) {
   }
   // Strict mode (only for blocks in the last round, where the model is more likely to hallucinate): the real text area must have a fairly uniform background color
   // and a reasonable amount of text strokes; drawing/noise areas are dropped instead of drawing a sub over the artwork.
-  if (strict && ink && (bg.frac < 0.35 || ink.count / ink.area < 0.015)) {
-    console.warn('[OCR] bỏ khối (vòng kiểm tra lại): vùng này không giống chữ trong bong bóng (vòng cuối)', { original: b.original, bgFrac: bg.frac, inkRatio: ink.count / ink.area });
-    return null;
-  }
-  // Text made only of dots/ellipses (e.g. "....") has very few strokes, so it does not pass the stroke check.
-  // For this type the block is kept, and the text box itself is used to measure line spacing.
-  const punctOnly = /^[\s.,…·!?~\-]+$/.test(String(b.original || ''));
-  if (!punctOnly && (!ink || ink.count < Math.max(20, ink.area * 0.001))) {
-    console.warn('[OCR] bỏ khối: không thấy nét chữ trong vùng text_box', { original: b.original, raw, bg, ink });
-    return null;
-  }
+  // (Automatic discard of blocks without text strokes was removed: every block Gemini returns is kept.)
   const ellipse = fromBubble && shapeOf(b) === 'ellipse';
   return {
     box, conf: 100, original: b.original || '', translated: b.translated, bg, raw,
@@ -549,6 +539,48 @@ function rectsOf(raw) {
 
 // Take only the first box of each field (bubble_box, text_box). When the model returns several boxes in one block
 // the later ones are ignored, not merged.
+// ---- Piece previews in the console (so you can see exactly what was sent to Gemini) ----
+const LOG_PIECE_THUMBS = true;
+async function thumbDataUrl(blob, maxW = 160, maxH = 400) {
+  const bmp = await createImageBitmap(blob);
+  const srcW = bmp.width, srcH = bmp.height; // read before close(), which resets the size
+  const scale = Math.min(1, maxW / srcW, maxH / srcH);
+  const w = Math.max(1, Math.round(srcW * scale));
+  const h = Math.max(1, Math.round(srcH * scale));
+  const c = new OffscreenCanvas(w, h);
+  c.getContext('2d').drawImage(bmp, 0, 0, w, h);
+  bmp.close();
+  const out = await c.convertToBlob({ type: 'image/jpeg', quality: 0.7 });
+  return { url: `data:image/jpeg;base64,${bytesToBase64(new Uint8Array(await out.arrayBuffer()))}`, w, h, srcW, srcH };
+}
+
+// Print one piece as an image in a collapsed console group: label, size, and the thumbnail
+async function logPieceThumb(label, blob) {
+  if (!LOG_PIECE_THUMBS) return;
+  try {
+    const t = await thumbDataUrl(blob);
+    console.groupCollapsed(`[PIECE] ${label} — ${t.srcW}×${t.srcH}px`);
+    console.log(`%c `, `background: url("${t.url}") no-repeat center / contain; padding: ${Math.floor(t.h / 2)}px ${Math.floor(t.w / 2)}px; border: 1px solid #555;`);
+    console.groupEnd();
+  } catch (err) {
+    console.warn(`[PIECE] không tạo được ảnh xem trước cho ${label}`, err);
+  }
+}
+
+// A box that is very thin and sits on the top or bottom edge of the image (or piece) is almost always a wrong box from the model.
+function isEdgeSliver(r, H) {
+  return (r.y1 - r.y0) < H * 0.04 && (r.y0 < H * 0.03 || r.y1 > H * 0.97);
+}
+
+// Drop a bubble box that is an edge sliver; the caller then falls back to the text box or skips the block
+function sanitizeBubble(r, H, b) {
+  if (r && isEdgeSliver(r, H)) {
+    console.warn('[OCR] bong bóng sát mép và quá mỏng, bỏ qua bong bóng', { original: b.original, rect: r });
+    return null;
+  }
+  return r;
+}
+
 function blockBoxes(b) {
   const bubbleNb = rectsOf(b.bubble_box)[0] || rectsOf(b.box)[0] || null;
   const textNb = rectsOf(b.text_box)[0] || bubbleNb;
@@ -572,12 +604,18 @@ function itemsFromBlocks(blocks, bitmap, strict) {
       console.warn('[OCR] bỏ khối: thiếu/không đọc được text_box', b);
       continue;
     }
-    const raw = toRect(textNb);
+    let raw = toRect(textNb);
+    const bubbleR = sanitizeBubble(bubbleNb ? toRect(bubbleNb) : null, H, b);
+    if (isEdgeSliver(raw, H)) {
+      if (!bubbleR) { console.warn('[OCR] bỏ khối: text_box và bong bóng đều sát mép', { original: b.original, raw }); continue; }
+      console.warn('[OCR] text_box sát mép, dùng bong bóng', { original: b.original, raw, bubble: bubbleR });
+      raw = bubbleR;
+    }
     if (raw.x1 - raw.x0 < 4 || raw.y1 - raw.y0 < 4) {
       console.warn('[OCR] bỏ khối: text_box nhỏ hơn 4px', { original: b.original, raw, W, H });
       continue;
     }
-    const it = buildItem(b, raw, bubbleNb ? toRect(bubbleNb) : null, data, W, H, null, strict);
+    const it = buildItem(b, raw, bubbleR, data, W, H, null, strict);
     if (it) items.push(it);
   }
   avoidOverlap(items);
@@ -609,7 +647,7 @@ function countReminder(n) {
   return `\n\nThis request contains exactly ${n} image${n === 1 ? '' : 's'}: labels "Image 0" to "Image ${n - 1}". The "images" array MUST have exactly ${n} entries, one for EVERY index from 0 to ${n - 1}. An image with no text at all (pure artwork, mostly black or empty, a cropped panel) STILL gets its own entry with an empty array, for example {"index":2,"summary":"pot on a table, no text","blocks":[]}. Never omit an entry because the image has nothing to translate.`;
 }
 
-const BATCH_MAX_IMAGES = 5; // small batch: lite models often return "no text" for the whole batch when the batch is large
+const BATCH_MAX_IMAGES = 8; // small batch: lite models often return "no text" for the whole batch when the batch is large
 const PARALLEL_REQUESTS = 3; // number of requests running at the same time (Promise.all)
 const BATCH_PAUSE_MS = 3000; // pause after each group of requests before sending the next group
 const BATCH_MAX_BYTES = 10 * 1024 * 1024;
@@ -995,12 +1033,36 @@ function findCutRow(img, W, lo, hi, target) {
     if (!cache.has(y)) cache.set(y, rowScore(y));
     return cache.get(y);
   };
+  // A row that crosses a speech bubble is mixed: part of it is bright (bubble interior) and part is not (dark background or artwork).
+  // A row that is fully bright (white gutter) or fully dark (black gutter) is not a bubble. Such rows are heavily penalized, so
+  // the cut moves away from bubbles whenever a free row exists in the search range.
+  const BUBBLE_PENALTY = 1e7;
+  const brightFrac = (y) => {
+    let n = 0;
+    for (let x = 0; x < W; x += 2) if (lum(x, y) > 200) n++;
+    return n / Math.ceil(W / 2);
+  };
+  const mixedCache = new Map();
+  const isMixed = (y) => {
+    if (y < 0 || y >= H) return false;
+    if (!mixedCache.has(y)) {
+      const f = brightFrac(y);
+      mixedCache.set(y, f > 0.01 && f < 0.97);
+    }
+    return mixedCache.get(y);
+  };
+  // Check the same 7-row band as the score: any mixed row in the band means the cut would pass through a bubble edge or interior
+  const bandMixed = (y) => {
+    for (let k = -10; k <= 10; k++) if (isMixed(y + k)) return true;
+    return false;
+  };
   let best = Math.min(hi, Math.max(lo, target));
   let bestScore = Infinity;
   let bestDist = Infinity;
   for (let y = lo; y <= hi; y++) {
     let sc = 0;
     for (let k = -3; k <= 3; k++) sc += rs(y + k);
+    if (bandMixed(y)) sc += BUBBLE_PENALTY;
     const dist = Math.abs(y - target);
     if (sc < bestScore || (sc === bestScore && dist < bestDist)) {
       bestScore = sc;
@@ -1008,7 +1070,7 @@ function findCutRow(img, W, lo, hi, target) {
       best = y;
     }
   }
-  return best;
+  return { y: best, mixed: bandMixed(best) };
 }
 
 // Cut one image into JPEG pieces. Keep only the compressed pieces; the full-image pixels are released right after cutting.
@@ -1033,7 +1095,16 @@ async function cutToTiles(blob, mime) {
     // The current piece <= TILE_MAX, and the remainder can still be split into (n - i) pieces <= TILE_MAX
     const lo = Math.max(prev + 1, target - CUT_SEARCH, H - (n - i) * TILE_MAX);
     const hi = Math.min(H - 1, target + CUT_SEARCH, prev + TILE_MAX);
-    cuts.push(findCutRow(img, W, Math.min(lo, hi), hi, target));
+    let r = findCutRow(img, W, Math.min(lo, hi), hi, target);
+    if (r.mixed) {
+      // Nothing free near the midpoint: search the whole range that still keeps every piece <= TILE_MAX
+      const wlo = Math.max(prev + 1, H - (n - i) * TILE_MAX);
+      const whi = Math.min(H - 1, prev + TILE_MAX);
+      const r2 = findCutRow(img, W, Math.min(wlo, whi), whi, target);
+      if (!r2.mixed) r = r2;
+      else console.warn(`[CUT] không có dòng cắt nào tránh được bong bóng (khoảng ${wlo}..${whi}), cắt tại ${r.y}`);
+    }
+    cuts.push(r.y);
   }
   cuts.push(H);
   const tiles = [];
@@ -1067,12 +1138,18 @@ async function itemsFromTileLocal(blocks, tile, W) {
       console.warn('[OCR] bỏ khối: thiếu/không đọc được text_box', b);
       continue;
     }
-    const raw = toRect(textNb);
+    let raw = toRect(textNb);
+    const bubbleR = sanitizeBubble(bubbleNb ? toRect(bubbleNb) : null, H, b);
+    if (isEdgeSliver(raw, H)) {
+      if (!bubbleR) { console.warn('[OCR] bỏ khối: text_box và bong bóng đều sát mép đoạn', { original: b.original, raw }); continue; }
+      console.warn('[OCR] text_box sát mép đoạn, dùng bong bóng', { original: b.original, raw, bubble: bubbleR });
+      raw = bubbleR;
+    }
     if (raw.x1 - raw.x0 < 4 || raw.y1 - raw.y0 < 4) {
       console.warn('[OCR] bỏ khối: khung chữ quá nhỏ', { original: b.original, raw });
       continue;
     }
-    const it = buildItem(b, raw, bubbleNb ? toRect(bubbleNb) : null, data, W, H, { y0: 0, y1: H }, false);
+    const it = buildItem(b, raw, bubbleR, data, W, H, { y0: 0, y1: H }, false);
     if (!it) {
       console.warn('[OCR] bỏ khối: buildItem không tạo khung', { original: b.original, raw, bubble: bubbleNb });
       continue;
@@ -1169,7 +1246,7 @@ Many pieces may contain no text at all (just artwork or empty space): that is no
 // Process several tall images: cut each into pieces and queue them. When TALL_BATCH_PIECES pieces are ready, send one request,
 // keep the remainder to combine with the next image. When all pieces of an image are done, call onDone(that image's result)
 // right away, without waiting for other images. Return [{ img, items, width, height, error }] in imgs order.
-const TALL_BATCH_PIECES = 3; // each request groups at most 3 tall-image pieces
+const TALL_BATCH_PIECES = 5; // each request groups at most 5 tall-image pieces
 async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
   // gi = the image's order in the whole run; piece labels are gi_i so the same piece always has the same label in every batch
   const recs = imgs.map((img, gi) => ({ img, gi, W: 0, H: 0, tiles: [], all: [], raw: [], error: null, pending: 0, result: null }));
@@ -1210,6 +1287,7 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
         const asked = pieces.map((pc) => pc.label);
         const got = [...byLabel.keys()];
         console.log(`[TILE] lô: gửi ${asked.join(' ')} | nhận ${got.join(' ') || '(không có)'}`);
+        for (const pc of pieces) await logPieceThumb(pc.label, pc.tile.blob);
         for (const pc of pieces) {
           let blocks = byLabel.get(pc.label);
           if (!blocks) {
@@ -1287,7 +1365,7 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
 async function geminiImageItems(blob, mime, apiKey, targetLang) {
   const [r] = await geminiTallBatch([{ blob, mime }], apiKey, targetLang);
   if (r.error) throw r.error;
-  return { items: r.items, width: r.width, height: r.height };
+  return { items: r.items, width: r.width, height: r.height, blocks: r.blocks || [] };
 }
 
 // Right-click image: Gemini returns boxes, convert them to pixel coordinates, then get the background color
@@ -1302,16 +1380,41 @@ async function geminiImageBlocks(tabId, srcUrl, targetLang) {
 }
 
 // ---------- Translate one image (right-click) ----------
+// Same summary format as translateAll, for one image (right-click or the image's own button)
+function logSingleStats(s) {
+  const drawn = s.drawn > 0 ? 1 : 0;
+  const notDrawn = 1 - drawn;
+  console.group(`[OCR] TỔNG KẾT: 1 ảnh | đã vẽ ${drawn} | khác ${notDrawn}`);
+  console.log(`khối từ model: ${s.modelBlocks} | vẽ được: ${s.drawn} | không vẽ được: ${Math.max(0, s.modelBlocks - s.drawn)}`);
+  console.log(`có khối từ model nhưng không vẽ được: ${s.modelBlocks > 0 && s.drawn === 0 && !s.error ? 1 : 0}`);
+  console.log(`model trả rỗng: ${s.modelBlocks === 0 && !s.error && !s.noText ? 1 : 0}`);
+  console.log(`không tìm thấy chữ: ${s.noText ? 1 : 0}`);
+  console.log(`lỗi: ${s.error ? 1 : 0}${s.error ? ' (' + s.error + ')' : ''}`);
+  console.log('   ' + s.url);
+  console.groupEnd();
+  if (s.blocks && s.blocks.length) {
+    console.groupCollapsed(`[OCR] DỮ LIỆU GEMINI (${s.blocks.length} khối)`);
+    console.log(s.url);
+    console.log(s.blocks);
+    console.groupEnd();
+  }
+}
+
 async function runImageViewer(tabId, srcUrl, quiet = false) {
   let ref = null; // transaction id for the quota deduction, used to refund quota if translation fails
+  const stat = { url: srcUrl, modelBlocks: 0, drawn: 0, noText: false, error: null, blocks: [] };
   try {
     if (!srcUrl) throw new Error('Không lấy được đường dẫn ảnh.');
     const { targetLang } = await getSettings();
     if (!quiet) notify(tabId, { type: 'SHOW_LOADING' });
     ref = await Account.charge(1); // must be logged in, have a key and have enough quota before translating
 
-    const { items, width, height } = await geminiImageBlocks(tabId, srcUrl, targetLang);
+    const { items, width, height, blocks } = await geminiImageBlocks(tabId, srcUrl, targetLang);
+    stat.modelBlocks = blocks.length;
+    stat.blocks = blocks;
+    stat.drawn = items.length;
     if (!items.length) {
+      stat.noText = blocks.length === 0; // model found no text; blocks returned but none drawable is counted separately
       await markState(tabId, 'noText', srcUrl); // side panel: lock an image that has no text
       throw new Error('Gemini không tìm thấy chữ trong ảnh.');
     }
@@ -1319,9 +1422,12 @@ async function runImageViewer(tabId, srcUrl, quiet = false) {
     notify(tabId, { type: 'OVERLAY_IMAGE', srcUrl, width, height, items });
     await markDone(tabId, srcUrl); // side panel: show "✓ Translated" and deselect this image
     notify(tabId, { type: 'HIDE_PANEL' });
+    logSingleStats(stat);
     return true;
   } catch (err) {
     console.error('[OCR]', srcUrl, err);
+    if (!stat.noText) stat.error = err.message;
+    logSingleStats(stat);
     await Account.refund(ref, 1); // error or no text: refund the quota
     notify(tabId, { type: 'SHOW_ERROR', error: err.message });
     return false;
@@ -1422,6 +1528,17 @@ function broadcastPanelState(winId, open) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'FETCH_IMAGE' && typeof msg.url === 'string') {
+    // Content script needs the original pixels of a cross-origin image to build the downloaded file
+    (async () => {
+      const blob = await loadImageBlob(null, msg.url);
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      return `data:${blob.type || 'image/png'};base64,${btoa(bin)}`;
+    })().then((dataUrl) => sendResponse({ dataUrl }), () => sendResponse({ error: true }));
+    return true;
+  }
   if (msg.type === 'GET_NOTEXT' && sender.tab) {
     // Content script on page load: return the no-text images for that tab
     chrome.storage.session.get('noText').then(

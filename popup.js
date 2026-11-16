@@ -486,7 +486,21 @@ function render() {
     const parts = [];
     if (!it.notext) parts.push(cb);
     parts.push(img, dim);
-    if (it.done) parts.push(badge);
+    if (it.done) {
+      parts.push(badge);
+      // Download the translated image (merged with the original) from the side panel
+      const dl = document.createElement('button');
+      dl.type = 'button';
+      dl.className = 'dl-btn';
+      dl.title = 'Tải ảnh đã dịch về máy';
+      dl.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19h14" stroke="#fff" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      dl.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation(); // do not scroll to the image (card click)
+        if (currentTabId != null) chrome.tabs.sendMessage(currentTabId, { type: 'DOWNLOAD_TRANSLATED', url: it.url }).catch(() => {});
+      };
+      parts.push(dl);
+    }
     card.append(...parts);
     listEl.appendChild(card);
   }

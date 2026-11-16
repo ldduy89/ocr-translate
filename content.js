@@ -27,6 +27,11 @@
         break;
       }
       case 'SCROLL_TO_IMAGE': scrollToImage(msg.url); break;
+      case 'DOWNLOAD_TRANSLATED': { // download button in the side panel: same file as the button on the image
+        const e = overlayEntries.get(msg.url);
+        if (e) downloadTranslatedImage(e);
+        break;
+      }
       case 'PANEL_STATE':     break; // the dock now reflects the in-page panel only
       case 'NOTEXT':          markNoText(msg.srcUrl); break;
       case 'MENU_TRANSLATE':  sendResponse({ handled: translateFromMenu(msg.srcUrl) }); break;
@@ -274,6 +279,7 @@
     layoutObserver.unobserve(entry.img);
     entry.layer.remove();
     if (entry.pin) { entry.pin.el.remove(); entry.pin = null; }
+    if (entry.dlPin) { entry.dlPin.el.remove(); entry.dlPin = null; }
     overlayEntries.delete(entry.srcUrl);
     releaseHost(entry.host);
   }
@@ -323,7 +329,7 @@
       } else {
         if (overlayEntries.get(entry.srcUrl) === entry) { // not removed for aspect-ratio reasons: hide temporarily and retry later
           layer.style.display = 'none';
-          if (entry.pin) setBtnShown(entry.pin.el, false);
+          hideTranslatedPins(entry);
         }
         return;
       }
@@ -636,9 +642,10 @@
     .pill{position:fixed;display:none;align-items:center;gap:8px;height:34px;padding:0 14px 0 5px;border:0;
       border-radius:999px;background:#fff;color:#2a3347;font:600 14px/1 system-ui,"Segoe UI",Roboto,sans-serif;
       box-shadow:0 2px 10px rgba(0,0,0,.3);cursor:pointer;pointer-events:auto;white-space:nowrap;
-      opacity:0;transform:scale(.6);transform-origin:top right;
+      opacity:0;transform:scale(.6);transform-origin:top left;
       transition:opacity .18s ease,transform .18s ease,box-shadow .15s}
     .pill.on{opacity:1;transform:scale(1)}
+    .pill.dl-only{width:34px;padding:0;justify-content:center;gap:0}
     .pill:hover{box-shadow:0 3px 14px rgba(0,0,0,.4)}
     .pill[data-state=loading]{cursor:progress}
     .ico{display:flex;width:24px;height:24px}
@@ -734,11 +741,11 @@
   function updatePin(entry) {
     const v = visibleRect(entry.img);
     if (pendingUrls.has(entry.srcUrl)) { // translating again: the spinning icon replaces this button
-      if (entry.pin) setBtnShown(entry.pin.el, false);
+      hideTranslatedPins(entry);
       return;
     }
     if (!pillsEnabled || v.r - v.l < BTN_MIN || v.b - v.t < 40) { // image scrolled off screen or too small
-      if (entry.pin) setBtnShown(entry.pin.el, false);
+      hideTranslatedPins(entry);
       return;
     }
     const pin = ensurePin(entry);
@@ -747,13 +754,131 @@
     pin.label.textContent = BTN_TEXT[state];
     pin.el.title = state === 'shown' ? 'Bấm để xem ảnh gốc' : 'Bấm để xem bản dịch';
     setBtnShown(pin.el, true);
-    pin.el.style.left = Math.max(v.l, v.r - pin.el.offsetWidth - 10) + 'px';
+    pin.el.style.left = v.l + 10 + 'px';
     pin.el.style.top = v.t + 10 + 'px';
+    placeDownloadPin(entry, v, pin.el);
     // Just translated and the button is visible: flash exactly once. When overlayImage runs the button is still hidden
     // (pendingUrls not yet cleared), so the flash is deferred until the first updatePin where the button is actually shown.
     if (entry.flashUntil && !entry.flashed) {
       if (Date.now() <= entry.flashUntil) { entry.flashed = true; flashPin(entry); }
       else entry.flashUntil = 0; // expired (the image was off screen when translation finished): drop it, do not flash when scrolled into view
+    }
+  }
+
+  // ---- Download the translated image (original + translation merged into one PNG) ----
+  function hideTranslatedPins(entry) {
+    if (entry.pin) setBtnShown(entry.pin.el, false);
+    if (entry.dlPin) setBtnShown(entry.dlPin.el, false);
+  }
+
+  function ensureDownloadPin(entry) {
+    if (entry.dlPin && entry.dlPin.el.isConnected) return entry.dlPin;
+    ensurePill();
+    entry.dlPin = makeButton(() => downloadTranslatedImage(entry));
+    entry.dlPin.el.dataset.state = 'download';
+    entry.dlPin.el.classList.add('dl-only'); // icon only, no text
+    entry.dlPin.el.title = 'Tải ảnh đã dịch về máy';
+    entry.dlPin.el.querySelector('.ico').innerHTML =
+      '<svg viewBox="0 0 24 24" width="24" height="24"><rect width="24" height="24" rx="6" fill="#2a3347"/>' +
+      '<path d="M12 5v9m0 0-4-4m4 4 4-4M6 18h12" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    return entry.dlPin;
+  }
+
+  // Right of the translate button, on the same row (top-left of the visible image)
+  function placeDownloadPin(entry, v, pinEl) {
+    const dl = ensureDownloadPin(entry);
+    setBtnShown(dl.el, true);
+    dl.el.style.left = v.l + 10 + pinEl.offsetWidth + 8 + 'px';
+    dl.el.style.top = v.t + 10 + 'px';
+  }
+
+  // Use the original pixels: the page image itself if it is not cross-origin, otherwise ask the background to fetch it
+  async function loadSourceImage(entry) {
+    const img = entry.img;
+    try {
+      const t = document.createElement('canvas');
+      t.width = 1; t.height = 1;
+      const tc = t.getContext('2d');
+      tc.drawImage(img, 0, 0, 1, 1);
+      tc.getImageData(0, 0, 1, 1); // throws SecurityError when the canvas is tainted
+      return img;
+    } catch (_) { /* cross-origin image: fetch it through the background */ }
+    const r = await chrome.runtime.sendMessage({ type: 'FETCH_IMAGE', url: entry.srcUrl }).catch(() => null);
+    if (!r || !r.dataUrl) throw new Error('Không tải được ảnh gốc');
+    const im = new Image();
+    im.src = r.dataUrl;
+    await im.decode();
+    return im;
+  }
+
+  function roundRectPath(ctx, x, y, w, h, r) {
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // Draw one translated box with the same geometry as layoutOverlay (its position and size are in layer px, scaled by k)
+  function drawTextBox(ctx, box, k) {
+    const x = parseFloat(box.style.left) * k, y = parseFloat(box.style.top) * k;
+    const w = parseFloat(box.style.width) * k, h = parseFloat(box.style.height) * k;
+    const fs = parseFloat(box.style.fontSize) * k;
+    ctx.save();
+    ctx.fillStyle = box.style.backgroundColor || '#fff';
+    ctx.beginPath();
+    if (box.style.borderRadius === '50%') {
+      ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+    } else {
+      const r = Math.min(parseFloat(box.style.borderRadius) * k || 0, w / 2, h / 2);
+      roundRectPath(ctx, x, y, w, h, r);
+    }
+    ctx.fill();
+    ctx.fillStyle = box.style.color || '#000';
+    ctx.font = `${fs}px ${FONT_FAMILY}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const lines = box.textContent.split('\n');
+    const lh = fs * LINE_H;
+    const startY = y + h / 2 - ((lines.length - 1) * lh) / 2;
+    lines.forEach((ln, i) => ctx.fillText(ln, x + w / 2, startY + i * lh));
+    ctx.restore();
+  }
+
+  async function renderTranslatedImage(entry) {
+    const W = entry.width, H = entry.height;
+    const canvas = document.createElement('canvas');
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(await loadSourceImage(entry), 0, 0, W, H);
+    // Text boxes are laid out in the layer's display px; scale to the original image's pixels
+    const layerW = parseFloat(entry.layer.style.width) || entry.img.getBoundingClientRect().width;
+    const k = W / layerW;
+    for (const box of entry.layer.children) drawTextBox(ctx, box, k);
+    return await new Promise((resolve, reject) =>
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Không tạo được ảnh'))), 'image/png'));
+  }
+
+  async function downloadTranslatedImage(entry) {
+    const el = entry.dlPin && entry.dlPin.el;
+    if (el) el.dataset.state = 'loading';
+    try {
+      const blob = await renderTranslatedImage(entry);
+      let base = 'anh';
+      try { base = new URL(entry.srcUrl, location.href).pathname.split('/').pop().replace(/\.[^.]+$/, '') || base; } catch (_) {}
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = base + '_ban-dich.png';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    } catch (err) {
+      console.error('[OCR] tải ảnh đã dịch lỗi:', err);
+    } finally {
+      if (el) el.dataset.state = 'download';
     }
   }
 
@@ -803,7 +928,7 @@
       return;
     }
     setBtnShown(p.btn.el, true);
-    p.btn.el.style.left = Math.max(v.l, v.r - p.btn.el.offsetWidth - 10) + 'px';
+    p.btn.el.style.left = v.l + 10 + 'px';
     p.btn.el.style.top = v.t + 10 + 'px';
   }
 
@@ -932,7 +1057,7 @@
     const place = () => {
       const v = visibleRect(img);
       if (v.r - v.l < BTN_MIN || v.b - v.t < 40) return false;
-      p.el.style.left = Math.max(v.l, v.r - p.el.offsetWidth - 10) + 'px';
+      p.el.style.left = v.l + 10 + 'px';
       p.el.style.top = v.t + 10 + 'px';
       return true;
     };
