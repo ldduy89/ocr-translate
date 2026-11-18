@@ -1194,14 +1194,24 @@ function dedupeItems(items) {
   return out;
 }
 
-// Send several pieces of the same image in one request, each piece with an order label
-// Send several pieces (of one or more images) in one request. Each piece label is "k_i":
-// k is the image's order in the batch, i is the piece's order within that image (top to bottom). Return a Map label -> blocks;
+// Send several pieces (of one or more images) in one request. Each piece label is a sequential number N (1, 2, 3...).
+// Return a Map label -> blocks;
 // labels the model does not return are not in the Map (so they are re-sent alone).
 async function callGeminiPieces(apiKey, pieces, targetLang) {
   const target = TARGET_NAMES[targetLang] || targetLang;
   const labels = pieces.map((p) => p.label);
-  const prompt = `You are given several vertical pieces of one or more comic/manga pages or screenshots. Each piece is labeled "Image k_i": k identifies the page, i is the order of the piece within that page, from top to bottom. A page that was not cut has a single piece with i = 0. The pieces of the same page are consecutive in this request. Cut pieces are split at blank gutters between panels, so no text block is split across two pieces. Pieces of different pages are unrelated: NEVER move a block from one page to another.
+  // Layout of this request: which pieces are parts of the same page, so the model knows they belong together
+  const pageNo = new Map();
+  const layout = pieces.map((p) => {
+    if (!pageNo.has(p.rec)) pageNo.set(p.rec, pageNo.size + 1);
+    const total = p.rec.tiles.length;
+    if (total === 1) return `- Image ${p.label}: page ${pageNo.get(p.rec)} (whole page)`;
+    const part = p.rec.tiles.indexOf(p.tile) + 1;
+    return `- Image ${p.label}: part ${part} of ${total} of page ${pageNo.get(p.rec)}`;
+  }).join('\n');
+  const prompt = `You are given several vertical pieces of one or more comic/manga pages or screenshots. Each piece is labeled "Image N", where N is its number. Each piece is either a whole page or one part of a page that was cut into several vertical parts, from top to bottom. Pieces with the same page number belong to the same page. Cut parts are split at blank gutters between panels, so no text block is split across two parts. Pieces of different pages are unrelated: NEVER move a block from one page to another.
+Layout of this request:
+${layout}
 For each piece, find every block of readable text in THAT piece only. Merge lines that belong to the same sentence or bubble into one block.
 For each block return:
 - "original": the exact text as written, in its original language, with line breaks replaced by spaces.
@@ -1217,8 +1227,8 @@ For each block return:
 - "vertical": true if the original text runs top-to-bottom in columns, otherwise false.
 - "font_size": the em size of the original text (height of one character line) in the same 0-1000 units as the piece height. For example, on a piece 1000 px tall, text with 25 px characters is 25. Estimate from the glyph size, not the bubble.
 Only translate dialogue, narration and caption text. SKIP all sound effects and onomatopoeia (stylized or hand-lettered words for noises, ambient sounds, heartbeats, whispering, footsteps, impacts, laughter or crying sounds, etc., e.g. "ドキドキ", "ざわざわ", "BAM", "thump", "bisbis"), as well as isolated interjections or mimetic words that only describe the scene rather than being spoken or narrated. Do not return a block for them at all.
-Return ONLY JSON in this form: {"images":[{"index":"0_0","summary":"...","blocks":[{"original":"...","translated":"...","bubble_box":[0,0,0,0],"text_box":[0,0,0,0],"shape":"ellipse","lines":1,"font_size":30,"vertical":false}]}]}
-Use the same index string as the piece label. Return exactly one entry per label, in the same order, and never skip a label.
+Return ONLY JSON in this form: {"images":[{"index":7,"summary":"...","blocks":[{"original":"...","translated":"...","bubble_box":[0,0,0,0],"text_box":[0,0,0,0],"shape":"ellipse","lines":1,"font_size":30,"vertical":false}]}]}
+Use the same number as the "Image N" label, as a number (for example 7). Return exactly one entry per label, in the same order, and never skip a label.
 In "summary", write 3-8 words describing what THAT specific piece shows (e.g. "woman at a desk, no text"), BEFORE listing its blocks.
 Many pieces may contain no text at all (just artwork or empty space): that is normal. Return an empty "blocks" array for them. NEVER move text from one piece to another to fill a gap. A block belongs only to the piece where its text is actually printed, and its boxes are relative to that piece.`;
 
@@ -1276,7 +1286,7 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
         for (const p of live) {
           const tile = p.rec.tiles[p.i];
           pieces.push({
-            label: `${p.rec.gi}_${p.i}`,
+            label: String(tile.seq),
             rec: p.rec,
             tile,
             mime: tile.mime,
@@ -1311,13 +1321,15 @@ async function geminiTallBatch(imgs, apiKey, targetLang, onDone = null) {
     }
   };
 
-  // Step 1: cut all tall images into pieces
+  // Step 1: cut all tall images into pieces. Each piece gets a sequential number 1, 2, 3... for this run
+  let pieceSeq = 0;
   for (const rec of recs) {
     try {
       const t = await cutToTiles(rec.img.blob, rec.img.mime);
       rec.W = t.W;
       rec.H = t.H;
       rec.tiles = t.tiles;
+      for (const tile of rec.tiles) tile.seq = ++pieceSeq;
       rec.whole = t.tiles.length === 1; // normal image: not cut
       rec.pending = rec.tiles.length;
     } catch (err) {
